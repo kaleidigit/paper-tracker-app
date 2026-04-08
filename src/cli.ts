@@ -1,0 +1,138 @@
+import fs from "node:fs/promises";
+import path from "node:path";
+import { loadAppConfig } from "./config.js";
+import { Logger } from "./logger.js";
+import { buildScheduleInstruction, installSchedule } from "./schedule-install.js";
+import { shouldRunNow } from "./scheduler.js";
+import { ensureRuntimeDirs, readMetrics, readState, writeJson } from "./storage.js";
+import type { MetricsState, RunState } from "./types.js";
+import { runWorkflow } from "./workflow.js";
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function cleanupTempDir(tempDir: string): Promise<void> {
+  try {
+    const files = await fs.readdir(tempDir);
+    await Promise.all(files.map((f: string) => fs.rm(path.join(tempDir, f), { recursive: true, force: true })));
+  } catch {
+    // No-op: temp cleanup failures should not block run completion.
+  }
+}
+
+async function saveRunState(
+  stateFile: string,
+  state: RunState,
+  metricsFile: string,
+  metrics: MetricsState
+): Promise<void> {
+  await writeJson(stateFile, state);
+  await writeJson(metricsFile, metrics);
+}
+
+async function runOnce(): Promise<void> {
+  const config = await loadAppConfig();
+  const paths = await ensureRuntimeDirs(config.runtime);
+  const logger = new Logger(paths.logsDir);
+  const state = await readState(paths.stateFile);
+  const metrics = await readMetrics(paths.metricsFile);
+  const runKey = new Date().toISOString();
+  const startedAt = Date.now();
+
+  await logger.info("run.start", { runKey, mode: "run-once" });
+
+  try {
+    const result = await runWorkflow(config);
+    const duration = Date.now() - startedAt;
+    state.last_run_key = runKey;
+    state.last_success_at = new Date().toISOString();
+    state.last_error = "";
+    state.last_duration_ms = duration;
+
+    metrics.total_runs += 1;
+    metrics.success_runs += 1;
+    metrics.avg_duration_ms =
+      (metrics.avg_duration_ms * (metrics.total_runs - 1) + duration) / Math.max(1, metrics.total_runs);
+    metrics.last_error = "";
+    metrics.updated_at = new Date().toISOString();
+
+    await saveRunState(paths.stateFile, state, paths.metricsFile, metrics);
+    await logger.info("run.success", {
+      runKey,
+      duration_ms: duration,
+      papers: result.payload.papers.length
+    });
+  } catch (error) {
+    const duration = Date.now() - startedAt;
+    state.last_run_key = runKey;
+    state.last_error = String(error);
+    state.last_duration_ms = duration;
+
+    metrics.total_runs += 1;
+    metrics.failed_runs += 1;
+    metrics.avg_duration_ms =
+      (metrics.avg_duration_ms * (metrics.total_runs - 1) + duration) / Math.max(1, metrics.total_runs);
+    metrics.last_error = String(error);
+    metrics.updated_at = new Date().toISOString();
+
+    await saveRunState(paths.stateFile, state, paths.metricsFile, metrics);
+    await logger.error("run.failed", { runKey, duration_ms: duration, error: String(error) });
+    throw error;
+  } finally {
+    await cleanupTempDir(paths.tempDir);
+    await logger.info("run.cleanup_done", { temp_dir: paths.tempDir });
+  }
+}
+
+async function runDaemon(): Promise<void> {
+  const config = await loadAppConfig();
+  const paths = await ensureRuntimeDirs(config.runtime);
+  const logger = new Logger(paths.logsDir);
+
+  await logger.warn("daemon.mode", {
+    message: "daemon mode keeps process alive; production should prefer OS schedule + run-once."
+  });
+  while (true) {
+    const latest = await loadAppConfig();
+    const state = await readState(paths.stateFile);
+    const decision = shouldRunNow(latest, state);
+    if (decision.ok) {
+      try {
+        await runOnce();
+      } catch {
+        // Failures already persisted by runOnce.
+      }
+    }
+    const everyHours = latest.pipeline?.schedule?.check_every_hours ?? 1;
+    await sleep(Math.max(10_000, everyHours * 60 * 60 * 1000));
+  }
+}
+
+async function main(): Promise<void> {
+  const mode = process.argv[2] || "run-once";
+  const config = await loadAppConfig();
+
+  if (mode === "schedule-print") {
+    const instruction = buildScheduleInstruction(config);
+    process.stdout.write(
+      `${JSON.stringify({ platform: instruction.platform, note: instruction.note, command: instruction.command }, null, 2)}\n`
+    );
+    return;
+  }
+  if (mode === "schedule-install") {
+    const installed = await installSchedule(config);
+    process.stdout.write(`${JSON.stringify(installed, null, 2)}\n`);
+    return;
+  }
+  if (mode === "daemon") {
+    await runDaemon();
+    return;
+  }
+  await runOnce();
+}
+
+main().catch((error) => {
+  process.stderr.write(`${String(error)}\n`);
+  process.exitCode = 1;
+});

@@ -1,0 +1,67 @@
+[
+  {
+    "name": "Nature",
+    "source_group": "Nature",
+    "rss_feeds": [
+      "https://www.nature.com/nature.rss"
+    ],
+    "issn": "0028-0836"
+  },
+  {
+    "name": "Nature Sustainability",
+    "source_group": "Nature",
+    "rss_feeds": [
+      "https://www.nature.com/natsustain.rss"
+    ],
+    "issn": "2398-9629"
+  },
+  {
+    "name": "Nature Climate Change",
+    "source_group": "Nature",
+    "rss_feeds": [
+      "https://www.nature.com/nclimate.rss"
+    ],
+    "issn": "1758-678X"
+  },
+  {
+    "name": "Nature Geoscience",
+    "source_group": "Nature",
+    "rss_feeds": [
+      "https://www.nature.com/ngeo.rss"
+    ],
+    "issn": "1752-0894"
+  },
+  {
+    "name": "Nature Food",
+    "source_group": "Nature",
+    "rss_feeds": [
+      "https://www.nature.com/natfood.rss"
+    ],
+    "issn": "2662-1355"
+  },
+  {
+    "name": "Nature Cities",
+    "source_group": "Nature",
+    "rss_feeds": [
+      "https://www.nature.com/natcities.rss"
+    ]
+  },
+  {
+    "name": "Nature Energy",
+    "source_group": "Nature",
+    "rss_feeds": [
+      "https://www.nature.com/nenergy.rss"
+    ],
+    "issn": "2058-7546"
+  },
+  {
+    "name": "Science",
+    "source_group": "Science",
+    "issn": "0036-8075"
+  },
+  {
+    "name": "PNAS",
+    "source_group": "PNAS",
+    "issn": "0027-8424"
+  }
+]

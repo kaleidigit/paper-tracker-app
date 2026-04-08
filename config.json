@@ -1,0 +1,110 @@
+{
+  "app": {
+    "title": "每日顶刊环境与能源论文追踪系统",
+    "timezone": "Asia/Shanghai"
+  },
+  "pipeline": {
+    "default_days": 2,
+    "schedule": {
+      "hour": 8,
+      "minute": 30,
+      "check_every_hours": 1
+    },
+    "paper_window": {
+      "mode": "since_yesterday_time",
+      "hour": 8,
+      "minute": 0,
+      "timezone": "Asia/Shanghai"
+    },
+    "digest_title_template": "{date} 顶刊论文日报"
+  },
+  "runtime": {
+    "mode": "run-once",
+    "state_dir": "data/ts-runner",
+    "logs_dir": "data/ts-runner/logs",
+    "temp_dir": "data/ts-runner/tmp",
+    "command_timeout_ms": 300000,
+    "retry": {
+      "max_attempts": 2,
+      "backoff_ms": 2000
+    }
+  },
+  "ai": {
+    "provider": "siliconflow",
+    "api_style": "openai-compatible",
+    "base_url": "https://api.siliconflow.cn/v1",
+    "model": "deepseek-ai/DeepSeek-V3.2",
+    "api_key_env": "SILICONFLOW_API_KEY",
+    "temperature": 0.2,
+    "max_tokens": 2000,
+    "filter": {
+      "enabled": true,
+      "mode": "rescue_keyword_miss",
+      "model": "deepseek-ai/DeepSeek-V3.2",
+      "temperature": 0.0,
+      "max_tokens": 500,
+      "min_confidence": 0.5
+    },
+    "prompts": {
+      "enrich_system": "你是环境、能源领域的科研情报编辑。请严格输出 JSON，字段为 title_zh, abstract_zh, summary_zh, novelty_points, main_content, classification。其中 novelty_points 和 main_content 必须是长度为 3 的字符串数组。classification 必须包含 domain, subdomain, tags，tags 必须是数组。请从给定分类树中选择最合适的领域与子领域。若不确定，可使用最接近的领域。分类树如下：{{taxonomy_json}}",
+      "enrich_user_template": "{{paper_json}}",
+      "filter_system": "你是环境、能源与气候方向的论文筛选器。请根据论文信息判断是否应纳入日报。只输出 JSON，字段必须为 keep(boolean), confidence(0~1), reason(string), suggested_domain(string), suggested_tags(array)。若与环境/能源/气候/可持续发展明显相关，则 keep=true，否则 false。",
+      "filter_user_template": "关键词参考：{{keywords_json}}\n分类树参考：{{taxonomy_json}}\n待判断论文：{{paper_json}}"
+    }
+  },
+  "sources": {
+    "keywords": [
+      "environment",
+      "environmental",
+      "climate",
+      "carbon",
+      "decarbonization",
+      "energy",
+      "battery",
+      "electrolyte",
+      "photovoltaic",
+      "solar",
+      "wind",
+      "hydrogen",
+      "catalysis",
+      "sustainability",
+      "emission",
+      "air pollution",
+      "water",
+      "soil",
+      "ecosystem",
+      "renewable"
+    ],
+    "journals_file": "journals.json",
+    "openalex_queries": [
+      "energy",
+      "climate",
+      "carbon",
+      "battery",
+      "hydrogen",
+      "solar",
+      "wind",
+      "water",
+      "pollution",
+      "catalysis",
+      "sustainability",
+      "emission"
+    ]
+  },
+  "classification": {
+    "file": "classification.json"
+  },
+  "feishu": {
+    "execution_mode": "host",
+    "data_dir": "data/feishu-publisher",
+    "doc_title_prefix": "[每日论文追踪]",
+    "doc_enabled": true,
+    "base_enabled": false,
+    "notify_enabled": true,
+    "notify_cmd": "lark-cli im +messages-send --as bot --chat-id {notify_chat_id} --text {notify_text}",
+    "notify_chat_id": "oc_4ccb276c17862766a89748817c6f5d3b",
+    "notify_message_template": "论文日报已生成：{title}\n文档链接：{doc_url}\n若链接为空，请稍后在飞书文档列表查看。",
+    "doc_publish_cmd": "lark-cli docs +create --as bot --title {title} --markdown \"$(cat {markdown_file})\"",
+    "base_publish_cmd": "echo \"Configure LARK_BASE_PUBLISH_CMD in config.json with a valid lark-cli base command\" && exit 1"
+  }
+}

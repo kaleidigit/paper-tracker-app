@@ -1,0 +1,29 @@
+{
+  "name": "paper-tracker-app",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Cross-platform TypeScript runner for daily paper tracking and push workflow.",
+  "type": "module",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "runner:once": "tsx src/cli.ts run-once",
+    "runner:full": "bash scripts/run_full_push.sh",
+    "runner:daemon": "tsx src/cli.ts daemon",
+    "runner:schedule:print": "tsx src/cli.ts schedule-print",
+    "runner:schedule:install": "tsx src/cli.ts schedule-install",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "dotenv": "^16.6.1",
+    "fast-xml-parser": "^4.5.3"
+  },
+  "devDependencies": {
+    "@types/node": "^24.7.2",
+    "tsx": "^4.20.6",
+    "typescript": "^5.9.3",
+    "vitest": "^3.2.4"
+  }
+}

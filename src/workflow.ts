@@ -1,0 +1,88 @@
+import type { AppConfig, JsonRecord, Paper, PublishPayload } from "./types.js";
+import { enrichPapers, fetchPapers, publishDigest } from "./modules.js";
+
+function nowInTimezone(timezone: string): Date {
+  const text = new Date().toLocaleString("en-US", { timeZone: timezone });
+  return new Date(text);
+}
+
+export function buildDigestTitle(config: AppConfig): string {
+  const timezone = config.app?.timezone || "Asia/Shanghai";
+  const dateText = nowInTimezone(timezone).toISOString().slice(0, 10);
+  const tpl = config.pipeline?.digest_title_template || "{date} 顶刊论文日报";
+  return tpl.replace("{date}", dateText);
+}
+
+export function buildMarkdown(title: string, papers: Paper[]): string {
+  const lines: string[] = [`# ${title}`, "", `共收录 ${papers.length} 篇。`, ""];
+  papers.forEach((paper, index) => {
+    const cls = paper.classification || {};
+    const journal = paper.journal?.name || "";
+    lines.push(`## ${index + 1}. ${paper.title_zh || paper.title_en}`);
+    lines.push(`- 英文标题: ${paper.title_en || ""}`);
+    lines.push(`- 期刊: ${journal}`);
+    lines.push(`- 日期: ${paper.published_date || ""}`);
+    lines.push(`- 一级领域: ${cls.domain || ""}`);
+    lines.push(`- 二级领域: ${cls.subdomain || ""}`);
+    lines.push(`- 标签: ${(cls.tags || []).join(", ")}`);
+    lines.push(`- 中文摘要: ${paper.abstract_zh || ""}`);
+    lines.push(`- 摘要总结: ${paper.summary_zh || ""}`);
+    lines.push(`- DOI: ${paper.doi || "N/A"}`);
+    lines.push(`- 链接: ${paper.url || ""}`);
+    lines.push("");
+  });
+  return lines.join("\n");
+}
+
+export function buildRecords(papers: Paper[]): JsonRecord[] {
+  return papers.map((paper) => ({
+    title_en: paper.title_en || "",
+    title_zh: paper.title_zh || "",
+    authors: (paper.authors || []).join(", "),
+    journal: paper.journal?.name || "",
+    source_group: paper.journal?.source_group || "",
+    published_date: paper.published_date || "",
+    domain: paper.classification?.domain || "",
+    subdomain: paper.classification?.subdomain || "",
+    tags: (paper.classification?.tags || []).join(", "),
+    abstract_zh: paper.abstract_zh || "",
+    summary_zh: paper.summary_zh || "",
+    novelty_points: (paper.novelty_points || []).join("\n"),
+    main_content: (paper.main_content || []).join("\n"),
+    doi: paper.doi || "",
+    url: paper.url || ""
+  }));
+}
+
+async function withRetry<T>(maxAttempts: number, backoffMs: number, job: () => Promise<T>): Promise<T> {
+  let lastError: unknown;
+  for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+    try {
+      return await job();
+    } catch (error) {
+      lastError = error;
+      if (attempt === maxAttempts) {
+        break;
+      }
+      await new Promise((resolve) => setTimeout(resolve, backoffMs));
+    }
+  }
+  throw lastError;
+}
+
+export async function runWorkflow(config: AppConfig): Promise<{ payload: PublishPayload; publishResult: JsonRecord }> {
+  const attempts = Math.max(1, config.runtime.retry.max_attempts);
+  const backoff = Math.max(0, config.runtime.retry.backoff_ms);
+  const title = buildDigestTitle(config);
+
+  const papers = await withRetry(attempts, backoff, () => fetchPapers(config));
+  const enriched = await withRetry(attempts, backoff, () => enrichPapers(config, papers));
+  const payload: PublishPayload = {
+    title,
+    markdown: buildMarkdown(title, enriched),
+    records: buildRecords(enriched),
+    papers: enriched
+  };
+  const publishResult = await withRetry(attempts, backoff, () => publishDigest(config, payload));
+  return { payload, publishResult };
+}
