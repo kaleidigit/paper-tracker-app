@@ -16,6 +16,8 @@
 - `{doc_url}`：文档发布成功后自动提取的链接（若能提取到）
 - `{notify_text}`：通知消息文本（由 `notify_message_template` 组装）
 
+告警命令复用相同占位符（`feishu.alert_cmd`）。
+
 ## 2. 默认文档推送模板
 
 ```text
@@ -78,3 +80,15 @@ lark-cli im +messages-send --as bot --user-id {notify_user_id} --text {notify_te
 如需批量通知，使用 `notify_user_ids` 数组，系统会逐个发送。
 
 可选维护字段：`notify_user_notes`（`open_id -> 备注`），仅用于人工可读管理，不参与命令执行。
+
+## 6. 空数据告警（推荐开启）
+
+当 `papers=0` 时系统会直接失败并发送告警，不会继续推送空日报。
+
+推荐配置：
+
+```text
+feishu.alert_enabled=true
+feishu.alert_cmd=lark-cli im +messages-send --as bot --chat-id {notify_chat_id} --text {notify_text}
+feishu.alert_chat_id=oc_xxx
+```

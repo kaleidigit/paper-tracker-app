@@ -12,6 +12,11 @@
 
 这是一个“将顶刊环境与能源论文自动处理为结构化 JSON，并通过 AI 增强后推送到飞书”的本地部署系统。
 
+当前实现状态（最小更新）：
+
+- 已完成去 Python 化与去 Docker 化
+- 当前运行形态为 Node.js/TypeScript 单进程编排（`run-once` + 系统计划任务）
+
 ## 2. 当前最高优先级
 
 后续所有改动的优先级如下：
@@ -102,22 +107,22 @@
 
 ## 6. 服务边界
 
-### 6.1 `paper-hub`
+### 6.1 `retrieval`（原 `paper-hub` 职责）
 
 - 负责抓取和标准化
 - 负责输出原始标准 JSON
 - 不负责飞书展示层
 - 不应耦合某个 AI 供应商
 
-### 6.2 `pipeline-runner`
+### 6.2 `runner`（原 `pipeline-runner` 职责）
 
 - 负责调度和编排
 - 负责调用 AI
 - 负责把原始 JSON 转成增强 JSON
 - 负责日报聚合
-- 默认使用轻量单线程循环
+- 默认推荐 `run-once`，由系统计划任务触发；`daemon` 仅保留兼容模式
 
-### 6.3 `feishu-publisher`
+### 6.3 `publisher`（原 `feishu-publisher` 职责）
 
 - 负责把增强后的结果写入飞书
 - 只处理展示与投递
@@ -135,8 +140,8 @@
 
 默认需要同步检查的文件：
 
-- [README.md](/Users/kaleid/Documents/Playground/README.md)
-- [AGENTS.md](/Users/kaleid/Documents/Playground/AGENTS.md)
+- [README.md](/Users/kaleid/Documents/paper-tracker-app/README.md)
+- [AGENTS.md](/Users/kaleid/Documents/paper-tracker-app/AGENTS.md)
 
 ## 8. 开发顺序约束
 
@@ -176,7 +181,7 @@
 4. runner 末端是否推送的是增强结果
 5. 飞书发布是否保留结构化字段
 
-如果本机环境不支持 Docker，也至少要做本地模块测试或 mock 测试。
+至少要做本地模块测试或 mock 测试。
 
 ## 11. 推荐后续任务拆分
 

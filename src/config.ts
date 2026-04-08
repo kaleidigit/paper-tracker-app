@@ -50,6 +50,11 @@ export async function loadAppConfig(): Promise<AppConfig> {
   parsed.pipeline.paper_window.timezone =
     parsed.pipeline.paper_window.timezone || parsed.app?.timezone || "Asia/Shanghai";
   parsed.ai = parsed.ai || {};
+  parsed.ai.translation = parsed.ai.translation || {};
+  parsed.ai.translation.enabled = Boolean(parsed.ai.translation.enabled ?? true);
+  parsed.ai.translation.model = parsed.ai.translation.model || parsed.ai.model || "";
+  parsed.ai.translation.api_key_env = parsed.ai.translation.api_key_env || parsed.ai.api_key_env || "SILICONFLOW_API_KEY";
+  parsed.ai.translation.required = Boolean(parsed.ai.translation.required ?? true);
   parsed.ai.temperature = asNumber(parsed.ai.temperature, 0.2);
   parsed.ai.max_tokens = asNumber(parsed.ai.max_tokens, 2000);
   parsed.ai.filter = parsed.ai.filter || {};
@@ -62,6 +67,9 @@ export async function loadAppConfig(): Promise<AppConfig> {
   parsed.sources.openalex_queries = Array.isArray(parsed.sources.openalex_queries) ? parsed.sources.openalex_queries : [];
   parsed.sources.journals_file = parsed.sources.journals_file || "journals.json";
   parsed.feishu = parsed.feishu || {};
+  parsed.feishu.alert_enabled = Boolean(parsed.feishu.alert_enabled ?? true);
+  parsed.feishu.alert_message_template =
+    parsed.feishu.alert_message_template || "未获取到任何论文数据，已终止日报推送，请立即排查数据源与过滤配置。";
   return parsed;
 }
 

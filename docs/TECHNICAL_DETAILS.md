@@ -7,7 +7,8 @@
 - `src/modules.ts`
   - 拉取 RSS + OpenAlex
   - 关键词筛选 + LLM 复筛
-  - 调用 OpenAI-compatible 接口做单篇增强
+  - 调用 OpenAI-compatible 接口做翻译与单篇增强
+  - `publication_type` 多级回填（RSS/DOI/OpenAlex/HTML meta）
   - 执行飞书发布命令并落盘结果
 - `src/workflow.ts`
   - 编排检索、处理、推送三阶段
@@ -47,6 +48,7 @@
 - `url`
 - `abstract_original`
 - `abstract_zh`
+- `publication_type`
 - `summary_zh`
 - `novelty_points`
 - `main_content`
@@ -63,10 +65,12 @@
 
 ## 6. 关键实现点
 
-- 抓取窗口：`pipeline.paper_window`，支持 `since_yesterday_time`
+- 抓取窗口：固定“昨日上午 08:00 之后”
 - LLM 复筛：`ai.filter.enabled` 与 `ai.filter.min_confidence`
+- LLM 翻译：`ai.translation.*`
 - Prompt 模板：支持 `{{taxonomy_json}}`, `{{paper_json}}`, `{{keywords_json}}`
-- 推送命令：`feishu.doc_publish_cmd` / `feishu.base_publish_cmd` / `feishu.notify_cmd`
+- 空数据保护：`papers=0` 失败并触发 `feishu.alert_cmd`
+- 推送命令：`feishu.doc_publish_cmd` / `feishu.base_publish_cmd` / `feishu.notify_cmd` / `feishu.alert_cmd`
 
 ## 7. 测试
 

@@ -23,23 +23,20 @@
 ### 2.2 模块边界
 
 - Retrieval（检索）：
-  - 输入：配置中的窗口参数
-  - 输出：标准论文 JSON 列表
+  - RSS + OpenAlex 抓取
+  - 时间窗口固定为“昨日上午 08:00 及之后”
+  - 输出标准论文 JSON 列表
 - Processor（处理）：
-  - 输入：标准论文 JSON
-  - 输出：增强论文 JSON（保持目标 schema）
+  - 关键词筛选 + LLM 复筛
+  - LLM 翻译（标题、摘要）+ LLM 增强
+  - 补全 `publication_type`
 - Publisher（推送）：
-  - 输入：标题、markdown、records、papers
-  - 输出：发布结果（文档 URL、通知结果、错误信息）
-
-### 2.3 插件类型
-
-- `http`：调用现有 HTTP 服务（如 `paper-hub` / `feishu-publisher`）。
-- `command`：调用任意本地命令（便于替换为纯 Node 或第三方服务）。
+  - 落盘 markdown/records/papers
+  - 执行飞书文档发布与消息通知命令
 
 ## 3. 关键配置
 
-在 `config.json` 增加：
+关键配置集中在 `config.json`：
 
 - `runtime`：
   - `mode`: `run-once` 或 `daemon`
@@ -48,12 +45,15 @@
   - `temp_dir`: 临时目录
   - `command_timeout_ms`: 命令执行超时
   - `retry.max_attempts` / `retry.backoff_ms`
-- `modules.retrieval` / `modules.processor` / `modules.publisher`：
-  - `type`: `http` or `command`
-  - `http.base_url`、`http.endpoints.*`
-  - `command.exec`、`command.args`
 - `pipeline.schedule`：
   - 仍保留 `hour`、`minute`、`timezone` 作为系统计划任务的触发时间来源。
+- `pipeline.paper_window`：
+  - 抓取窗口（默认昨日上午 08:00 起）
+- `ai.translation`：
+  - 翻译模型与翻译 API key 环境变量
+  - `required=true` 时翻译失败会导致本次任务失败
+- `feishu.alert_*`：
+  - 空数据/异常场景告警命令与目标
 
 ## 4. 生命周期与资源管理
 
@@ -76,6 +76,10 @@
   - 成功/失败次数
   - 平均耗时
   - 最近一次错误
+- 当 `papers=0`：
+  - 工作流直接失败
+  - 触发 `feishu.alert_cmd` 告警
+  - 不执行日报推送
 
 ## 6. 跨平台部署
 
@@ -89,6 +93,12 @@
 
 ```bash
 npm run runner:once
+```
+
+### 6.2.1 翻译链路连通性自检
+
+```bash
+npm run runner:llm-check
 ```
 
 ### 6.3 生成计划任务命令
@@ -124,3 +134,7 @@ npm run runner:schedule:install
 - Retrieval/Processor/Publisher 均由 TypeScript 原生实现。
 - 推送通过本机 `lark-cli` 命令模板执行。
 - 若需扩展新平台，仅需新增命令模板与配置字段，无需改调度主干。
+- `publication_type` 采用多级回填：
+  - RSS 字段直读（若有）
+  - DOI 查询 OpenAlex
+  - 文章页 `citation_article_type` 元标签兜底

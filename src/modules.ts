@@ -38,6 +38,16 @@ function parseDateTime(value: unknown): Date | null {
   return Number.isNaN(date.getTime()) ? null : date;
 }
 
+function formatDateInTz(date: Date, timezone: string): string {
+  const formatter = new Intl.DateTimeFormat("en-CA", {
+    timeZone: timezone,
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit"
+  });
+  return formatter.format(date);
+}
+
 function itemKey(paper: Paper): string {
   return normalizeText(paper.doi) || normalizeText(paper.url) || `${normalizeText(paper.journal?.name)}::${paper.title_en}`;
 }
@@ -105,26 +115,23 @@ function matchesKeywords(config: AppConfig, title: string, abstract: string, jou
   return keywords.some((keyword) => keyword && blob.includes(keyword));
 }
 
-function paperWindowStart(config: AppConfig): Date {
+function strictWindowStartAt(config: AppConfig): Date {
   const timezone = config.pipeline?.paper_window?.timezone || config.app?.timezone || "Asia/Shanghai";
-  const mode = normalizeText(config.pipeline?.paper_window?.mode) || "since_yesterday_time";
-  const now = new Date(new Date().toLocaleString("en-US", { timeZone: timezone }));
-  if (mode === "since_yesterday_time") {
-    const start = new Date(now);
-    start.setDate(now.getDate() - 1);
-    start.setHours(config.pipeline?.paper_window?.hour ?? 8, config.pipeline?.paper_window?.minute ?? 0, 0, 0);
-    return start;
-  }
-  const start = new Date(now);
-  start.setDate(start.getDate() - (config.pipeline?.default_days ?? 2));
-  return start;
+  const nowInTz = new Date(new Date().toLocaleString("en-US", { timeZone: timezone }));
+  const yesterday = new Date(nowInTz);
+  yesterday.setDate(nowInTz.getDate() - 1);
+  yesterday.setHours(8, 0, 0, 0);
+  return yesterday;
 }
 
 async function fetchJson(url: string, timeoutMs: number): Promise<JsonRecord> {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
   try {
-    const response = await fetch(url, { signal: controller.signal });
+    const response = await fetch(url, {
+      signal: controller.signal,
+      headers: { "user-agent": "paper-tracker/1.0 (+https://local)" }
+    });
     if (!response.ok) {
       throw new Error(`HTTP ${response.status}`);
     }
@@ -138,7 +145,10 @@ async function fetchText(url: string, timeoutMs: number): Promise<string> {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
   try {
-    const response = await fetch(url, { signal: controller.signal });
+    const response = await fetch(url, {
+      signal: controller.signal,
+      headers: { "user-agent": "paper-tracker/1.0 (+https://local)" }
+    });
     if (!response.ok) {
       throw new Error(`HTTP ${response.status}`);
     }
@@ -153,6 +163,15 @@ function aiApiKey(config: AppConfig): string {
   const key = process.env[env] || process.env.OPENAI_API_KEY || process.env.OPENAI_COMPATIBLE_API_KEY || "";
   if (!key) {
     throw new Error(`Missing AI API key in env ${env}`);
+  }
+  return key;
+}
+
+function translationApiKey(config: AppConfig): string {
+  const env = config.ai?.translation?.api_key_env || config.ai?.api_key_env || "SILICONFLOW_API_KEY";
+  const key = process.env[env] || process.env.OPENAI_API_KEY || process.env.OPENAI_COMPATIBLE_API_KEY || "";
+  if (!key) {
+    throw new Error(`Missing translation API key in env ${env}`);
   }
   return key;
 }
@@ -175,7 +194,8 @@ async function chatJson(config: AppConfig, payload: JsonRecord): Promise<JsonRec
     body: JSON.stringify(payload)
   });
   if (!response.ok) {
-    throw new Error(`AI request failed: HTTP ${response.status}`);
+    const body = normalizeText(await response.text());
+    throw new Error(`AI request failed: HTTP ${response.status}; body=${body}`);
   }
   const json = (await response.json()) as JsonRecord;
   const choices = toArray(json.choices as JsonRecord[] | undefined);
@@ -216,6 +236,29 @@ async function llmFilter(config: AppConfig, taxonomy: Array<Record<string, unkno
   return { ...parsed, used: true, keep, confidence };
 }
 
+function normalizePublicationType(value: unknown): string {
+  const text = normalizeText(value).toLowerCase();
+  if (!text) {
+    return "unknown";
+  }
+  if (text.includes("review")) {
+    return "review";
+  }
+  if (text.includes("editorial")) {
+    return "editorial";
+  }
+  if (text.includes("letter")) {
+    return "letter";
+  }
+  if (text.includes("comment")) {
+    return "comment";
+  }
+  if (text.includes("article")) {
+    return "article";
+  }
+  return text;
+}
+
 function buildPaper(input: {
   title: string;
   authors: string[];
@@ -225,6 +268,7 @@ function buildPaper(input: {
   doi: string;
   url: string;
   abstractOriginal: string;
+  publicationType: string;
   sourceProvider: string;
   rawFeed: string;
   rawRecordId: string;
@@ -247,6 +291,7 @@ function buildPaper(input: {
     url: normalizeText(input.url),
     abstract_original: abs,
     abstract_zh: "",
+    publication_type: normalizePublicationType(input.publicationType),
     summary_zh: "",
     novelty_points: [],
     main_content: [],
@@ -259,24 +304,44 @@ function buildPaper(input: {
   };
 }
 
+function resolveFeedItems(parsed: JsonRecord): JsonRecord[] {
+  const rdf = parsed["rdf:RDF"] as JsonRecord | undefined;
+  if (rdf) {
+    return toArray(rdf.item as JsonRecord[] | undefined);
+  }
+  const rss = parsed.rss as JsonRecord | undefined;
+  if (rss) {
+    return toArray(((rss.channel as JsonRecord | undefined)?.item) as JsonRecord[] | undefined);
+  }
+  const atom = parsed.feed as JsonRecord | undefined;
+  if (atom) {
+    return toArray(atom.entry as JsonRecord[] | undefined);
+  }
+  return [];
+}
+
 async function collectNature(config: AppConfig, taxonomy: Array<Record<string, unknown>>): Promise<Paper[]> {
   const journals = await loadJournals(config);
   const feeds = journals.flatMap((j) => toArray(j.rss_feeds as string[] | undefined));
   const parser = new XMLParser({ ignoreAttributes: false, attributeNamePrefix: "" });
-  const start = paperWindowStart(config);
+  const start = strictWindowStartAt(config);
   const papers: Paper[] = [];
   for (const feedUrl of feeds) {
     try {
       const xml = await fetchText(feedUrl, config.runtime.command_timeout_ms);
       const parsed = parser.parse(xml) as JsonRecord;
-      const channel = parsed.rss ? (parsed.rss as JsonRecord).channel : parsed.feed;
-      const items = toArray(((channel as JsonRecord).item || (channel as JsonRecord).entry) as JsonRecord[] | undefined);
-      for (const item of items) {
+      const items = resolveFeedItems(parsed);
+      const parsedItems = items.map((item) => {
+        const publishedAt = parseDateTime(item.pubDate || item.published || item.updated || item["dc:date"]);
+        return { item, publishedAt };
+      });
+      for (const entry of parsedItems) {
+        const item = entry.item;
         const title = normalizeText(item.title);
         const summary = normalizeText(item.description || item.summary);
         const journal = normalizeText(item["prism:publicationName"] || item.source || "Nature");
-        const publishedDate = parseDate(item.pubDate || item.published || item.updated);
-        const publishedAt = parseDateTime(item.pubDate || item.published || item.updated);
+        const publishedDate = parseDate(item.pubDate || item.published || item.updated || item["dc:date"]);
+        const publishedAt = entry.publishedAt;
         if (publishedAt && publishedAt < start) {
           continue;
         }
@@ -303,6 +368,9 @@ async function collectNature(config: AppConfig, taxonomy: Array<Record<string, u
             doi: normalizeText(item["dc:identifier"]),
             url: normalizeText(item.link),
             abstractOriginal: summary,
+            publicationType: normalizeText(
+              item["dc:type"] || item["prism:publicationType"] || item["prism:section"] || item.category
+            ),
             sourceProvider: "nature-rss",
             rawFeed: feedUrl,
             rawRecordId: normalizeText(item.guid || item.link),
@@ -323,9 +391,10 @@ async function collectOpenalex(config: AppConfig, taxonomy: Array<Record<string,
   const queries = toArray(config.sources?.openalex_queries).length
     ? (config.sources?.openalex_queries as string[])
     : ["energy", "climate"];
-  const startDate = paperWindowStart(config).toISOString().slice(0, 10);
+  const windowStart = strictWindowStartAt(config);
+  const startDate = formatDateInTz(windowStart, "UTC");
   const select =
-    "id,title,doi,publication_date,authorships,primary_location,abstract_inverted_index";
+    "id,title,doi,publication_date,type,authorships,primary_location,abstract_inverted_index";
   const papers: Paper[] = [];
   const baseFilters = [`from_publication_date:${startDate}`, "type:article"];
   if (issns.length > 0) {
@@ -370,6 +439,7 @@ async function collectOpenalex(config: AppConfig, taxonomy: Array<Record<string,
             doi: normalizeText(item.doi),
             url: normalizeText(item.doi || item.id),
             abstractOriginal: abstract,
+            publicationType: normalizeText(item.type),
             sourceProvider: "openalex",
             rawFeed: "https://api.openalex.org/works",
             rawRecordId: normalizeText(item.id),
@@ -384,12 +454,105 @@ async function collectOpenalex(config: AppConfig, taxonomy: Array<Record<string,
   return papers;
 }
 
+async function resolvePublicationTypeByDoi(doi: string, timeoutMs: number): Promise<string> {
+  const normalized = normalizeText(doi)
+    .replace(/^doi:/i, "")
+    .trim();
+  if (!normalized) {
+    return "unknown";
+  }
+  const url = `https://api.openalex.org/works/https://doi.org/${encodeURIComponent(normalized)}`;
+  try {
+    const payload = await fetchJson(url, timeoutMs);
+    return normalizePublicationType(payload.type);
+  } catch {
+    return "unknown";
+  }
+}
+
+function extractPublicationTypeFromHtml(html: string): string {
+  const patterns = [
+    /citation_article_type[^>]*content=["']([^"']+)["']/i,
+    /name=["']dc\.type["'][^>]*content=["']([^"']+)["']/i,
+    /property=["']article:type["'][^>]*content=["']([^"']+)["']/i
+  ];
+  for (const pattern of patterns) {
+    const match = html.match(pattern);
+    if (match?.[1]) {
+      return normalizePublicationType(match[1]);
+    }
+  }
+  return "unknown";
+}
+
+async function resolvePublicationTypeByUrl(url: string, timeoutMs: number): Promise<string> {
+  const articleUrl = normalizeText(url);
+  if (!articleUrl) {
+    return "unknown";
+  }
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    const response = await fetch(articleUrl, {
+      signal: controller.signal,
+      headers: { "user-agent": "paper-tracker/1.0 (+https://local)" }
+    });
+    if (!response.ok) {
+      return "unknown";
+    }
+    const html = await response.text();
+    return extractPublicationTypeFromHtml(html);
+  } catch {
+    return "unknown";
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+async function enrichPublicationTypes(config: AppConfig, papers: Paper[]): Promise<Paper[]> {
+  const doiCache = new Map<string, string>();
+  const urlCache = new Map<string, string>();
+  const result: Paper[] = [];
+  for (const paper of papers) {
+    const current = normalizePublicationType(paper.publication_type);
+    if (current !== "unknown") {
+      result.push({ ...paper, publication_type: current });
+      continue;
+    }
+    const rawDoi = normalizeText(paper.doi);
+    let resolved = "unknown";
+    if (rawDoi) {
+      const cacheKey = rawDoi.toLowerCase();
+      if (!doiCache.has(cacheKey)) {
+        const fromDoi = await resolvePublicationTypeByDoi(rawDoi, config.runtime.command_timeout_ms);
+        doiCache.set(cacheKey, fromDoi);
+      }
+      resolved = doiCache.get(cacheKey) || "unknown";
+    }
+    if (resolved === "unknown") {
+      const rawUrl = normalizeText(paper.url);
+      if (rawUrl) {
+        const urlKey = rawUrl.toLowerCase();
+        if (!urlCache.has(urlKey)) {
+          const fromUrl = await resolvePublicationTypeByUrl(rawUrl, config.runtime.command_timeout_ms);
+          urlCache.set(urlKey, fromUrl);
+        }
+        resolved = urlCache.get(urlKey) || "unknown";
+      }
+    }
+    result.push({ ...paper, publication_type: resolved });
+  }
+  return result;
+}
+
 export async function fetchPapers(config: AppConfig): Promise<Paper[]> {
   const taxonomy = await loadTaxonomy(config);
-  const papers = [...(await collectNature(config, taxonomy)), ...(await collectOpenalex(config, taxonomy))];
+  const nature = await collectNature(config, taxonomy);
+  const openalex = await collectOpenalex(config, taxonomy);
+  const papers = [...nature, ...openalex];
   const seen = new Set<string>();
   const ordered = papers.sort((a, b) => `${b.published_date}`.localeCompare(`${a.published_date}`));
-  return ordered.filter((paper) => {
+  const deduped = ordered.filter((paper) => {
     const key = itemKey(paper);
     if (seen.has(key)) {
       return false;
@@ -397,20 +560,87 @@ export async function fetchPapers(config: AppConfig): Promise<Paper[]> {
     seen.add(key);
     return true;
   });
+  return enrichPublicationTypes(config, deduped);
+}
+
+async function translatePaperFields(config: AppConfig, paper: Paper): Promise<Pick<Paper, "title_zh" | "abstract_zh">> {
+  if (!config.ai?.translation?.enabled) {
+    return { title_zh: paper.title_zh || "", abstract_zh: paper.abstract_zh || "" };
+  }
+  const baseUrl = normalizeText(config.ai?.base_url);
+  const model = normalizeText(config.ai?.translation?.model || config.ai?.model);
+  if (!baseUrl || !model) {
+    return { title_zh: paper.title_zh || "", abstract_zh: paper.abstract_zh || "" };
+  }
+  const response = await fetch(`${baseUrl.replace(/\/$/, "")}/chat/completions`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${translationApiKey(config)}`
+    },
+    body: JSON.stringify({
+      model,
+      temperature: 0,
+      max_tokens: 1200,
+      response_format: { type: "json_object" },
+      messages: [
+        {
+          role: "system",
+          content:
+            "你是学术翻译助手。请只输出 JSON，字段为 title_zh 和 abstract_zh。要求忠实、简洁、术语准确。"
+        },
+        {
+          role: "user",
+          content: JSON.stringify({
+            title_en: paper.title_en || "",
+            abstract_original: paper.abstract_original || ""
+          })
+        }
+      ]
+    })
+  });
+  if (!response.ok) {
+    const body = normalizeText(await response.text());
+    throw new Error(`translation request failed: HTTP ${response.status}; body=${body}`);
+  }
+  const json = (await response.json()) as JsonRecord;
+  const choices = toArray(json.choices as JsonRecord[] | undefined);
+  const content = normalizeText(((choices[0] as JsonRecord | undefined)?.message as JsonRecord | undefined)?.content);
+  const translated = JSON.parse(content || "{}") as JsonRecord;
+  return {
+    title_zh: normalizeText(translated.title_zh),
+    abstract_zh: normalizeText(translated.abstract_zh)
+  };
 }
 
 async function enrichOne(config: AppConfig, paper: Paper, taxonomy: Array<Record<string, unknown>>): Promise<Paper> {
+  let translated: Pick<Paper, "title_zh" | "abstract_zh"> = {
+    title_zh: paper.title_zh || "",
+    abstract_zh: paper.abstract_zh || ""
+  };
+  let translationError = "";
+  try {
+    translated = await translatePaperFields(config, paper);
+  } catch (error) {
+    translationError = String(error);
+    if (config.ai?.translation?.required) {
+      throw new Error(`translation_required_failed: ${translationError}`);
+    }
+  }
   const prompts = config.ai?.prompts || {};
   const values = {
     taxonomy_json: JSON.stringify(taxonomy),
     paper_json: JSON.stringify({
       title_en: paper.title_en,
+      title_zh: translated.title_zh,
       authors: paper.authors || [],
       journal: paper.journal || {},
       published_date: paper.published_date || "",
       doi: paper.doi || "",
       url: paper.url || "",
       abstract_original: paper.abstract_original || "",
+      abstract_zh: translated.abstract_zh,
+      publication_type: paper.publication_type || "unknown",
       classification_candidate: paper.classification || {}
     })
   };
@@ -433,8 +663,10 @@ async function enrichOne(config: AppConfig, paper: Paper, taxonomy: Array<Record
   });
   return {
     ...paper,
-    title_zh: normalizeText(parsed.title_zh) || paper.title_zh || "",
-    abstract_zh: normalizeText(parsed.abstract_zh),
+    title_zh: normalizeText(parsed.title_zh) || translated.title_zh || paper.title_zh || "",
+    abstract_zh: normalizeText(parsed.abstract_zh) || translated.abstract_zh || "",
+    publication_type: normalizePublicationType(paper.publication_type),
+    translation_error: translationError || undefined,
     summary_zh: normalizeText(parsed.summary_zh),
     novelty_points: dedupeStrings(toArray(parsed.novelty_points as string[] | undefined)).slice(0, 3),
     main_content: dedupeStrings(toArray(parsed.main_content as string[] | undefined)).slice(0, 3),
@@ -583,4 +815,28 @@ export async function publishDigest(config: AppConfig, payload: PublishPayload):
   );
   result.latest_meta = latestPath;
   return result;
+}
+
+export async function sendAlert(config: AppConfig, message: string): Promise<void> {
+  const feishu = config.feishu || {};
+  if (!Boolean(feishu.alert_enabled)) {
+    return;
+  }
+  const alertTemplate = normalizeText(feishu.alert_message_template) || "未获取到任何论文数据";
+  const alertText = `${alertTemplate}\n${message}`;
+  const vars: Record<string, string> = {
+    notify_text: shellEscape(alertText),
+    notify_chat_id: shellEscape(normalizeText(feishu.alert_chat_id || feishu.notify_chat_id)),
+    notify_user_id: shellEscape(normalizeText(feishu.alert_user_id || feishu.notify_user_id)),
+    title: shellEscape(""),
+    markdown_file: shellEscape(""),
+    records_file: shellEscape(""),
+    papers_file: shellEscape(""),
+    doc_url: shellEscape("")
+  };
+  const command = normalizeText(feishu.alert_cmd || feishu.notify_cmd);
+  if (!command) {
+    return;
+  }
+  await runTemplate(config, command, vars);
 }

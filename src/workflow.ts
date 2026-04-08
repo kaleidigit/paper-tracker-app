@@ -1,5 +1,12 @@
 import type { AppConfig, JsonRecord, Paper, PublishPayload } from "./types.js";
-import { enrichPapers, fetchPapers, publishDigest } from "./modules.js";
+import { enrichPapers, fetchPapers, publishDigest, sendAlert } from "./modules.js";
+
+export class EmptyPapersError extends Error {
+  constructor(message = "未获取到任何论文数据") {
+    super(message);
+    this.name = "EmptyPapersError";
+  }
+}
 
 function nowInTimezone(timezone: string): Date {
   const text = new Date().toLocaleString("en-US", { timeZone: timezone });
@@ -22,6 +29,7 @@ export function buildMarkdown(title: string, papers: Paper[]): string {
     lines.push(`- 英文标题: ${paper.title_en || ""}`);
     lines.push(`- 期刊: ${journal}`);
     lines.push(`- 日期: ${paper.published_date || ""}`);
+    lines.push(`- 类型: ${paper.publication_type || "unknown"}`);
     lines.push(`- 一级领域: ${cls.domain || ""}`);
     lines.push(`- 二级领域: ${cls.subdomain || ""}`);
     lines.push(`- 标签: ${(cls.tags || []).join(", ")}`);
@@ -42,6 +50,7 @@ export function buildRecords(papers: Paper[]): JsonRecord[] {
     journal: paper.journal?.name || "",
     source_group: paper.journal?.source_group || "",
     published_date: paper.published_date || "",
+    publication_type: paper.publication_type || "",
     domain: paper.classification?.domain || "",
     subdomain: paper.classification?.subdomain || "",
     tags: (paper.classification?.tags || []).join(", "),
@@ -76,6 +85,9 @@ export async function runWorkflow(config: AppConfig): Promise<{ payload: Publish
   const title = buildDigestTitle(config);
 
   const papers = await withRetry(attempts, backoff, () => fetchPapers(config));
+  if (papers.length === 0) {
+    throw new EmptyPapersError();
+  }
   const enriched = await withRetry(attempts, backoff, () => enrichPapers(config, papers));
   const payload: PublishPayload = {
     title,
@@ -85,4 +97,8 @@ export async function runWorkflow(config: AppConfig): Promise<{ payload: Publish
   };
   const publishResult = await withRetry(attempts, backoff, () => publishDigest(config, payload));
   return { payload, publishResult };
+}
+
+export async function sendEmptyPapersAlert(config: AppConfig): Promise<void> {
+  await sendAlert(config, "未获取到任何论文数据，已终止日报推送，请排查抓取源、时间窗口与过滤配置。");
 }

@@ -11,6 +11,8 @@ export interface Paper {
   url?: string;
   abstract_original?: string;
   abstract_zh?: string;
+  publication_type?: string;
+  translation_error?: string;
   summary_zh?: string;
   novelty_points?: string[];
   main_content?: string[];
@@ -27,32 +29,6 @@ export interface PublishPayload {
   markdown: string;
   records: JsonRecord[];
   papers: Paper[];
-}
-
-export interface DailyResponse {
-  title?: string;
-  generated_at?: string;
-  count?: number;
-  papers: Paper[];
-}
-
-export interface ModuleCommandConfig {
-  exec: string;
-  args?: string[];
-}
-
-export interface ModuleHttpConfig {
-  base_url: string;
-  daily_endpoint?: string;
-  enrich_endpoint?: string;
-  publish_endpoint?: string;
-  concurrency?: number;
-}
-
-export interface ModuleConfig {
-  type: "http" | "command";
-  http?: ModuleHttpConfig;
-  command?: ModuleCommandConfig;
 }
 
 export interface RuntimeConfig {
@@ -91,6 +67,12 @@ export interface AppConfig {
     base_url?: string;
     model?: string;
     api_key_env?: string;
+    translation?: {
+      enabled?: boolean;
+      model?: string;
+      api_key_env?: string;
+      required?: boolean;
+    };
     temperature?: number;
     max_tokens?: number;
     filter?: {
@@ -124,6 +106,11 @@ export interface AppConfig {
     base_enabled?: boolean;
     notify_enabled?: boolean;
     notify_cmd?: string;
+    alert_enabled?: boolean;
+    alert_cmd?: string;
+    alert_chat_id?: string;
+    alert_user_id?: string;
+    alert_message_template?: string;
     notify_chat_id?: string;
     notify_user_id?: string;
     notify_user_ids?: string[];

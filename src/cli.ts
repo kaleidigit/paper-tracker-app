@@ -6,7 +6,7 @@ import { buildScheduleInstruction, installSchedule } from "./schedule-install.js
 import { shouldRunNow } from "./scheduler.js";
 import { ensureRuntimeDirs, readMetrics, readState, writeJson } from "./storage.js";
 import type { MetricsState, RunState } from "./types.js";
-import { runWorkflow } from "./workflow.js";
+import { EmptyPapersError, runWorkflow, sendEmptyPapersAlert } from "./workflow.js";
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -65,6 +65,14 @@ async function runOnce(): Promise<void> {
     });
   } catch (error) {
     const duration = Date.now() - startedAt;
+    if (error instanceof EmptyPapersError) {
+      try {
+        await sendEmptyPapersAlert(config);
+        await logger.warn("run.empty_papers_alert_sent", { runKey });
+      } catch (alertError) {
+        await logger.error("run.empty_papers_alert_failed", { runKey, error: String(alertError) });
+      }
+    }
     state.last_run_key = runKey;
     state.last_error = String(error);
     state.last_duration_ms = duration;

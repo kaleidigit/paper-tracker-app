@@ -8,8 +8,9 @@
     "node": ">=20"
   },
   "scripts": {
-    "build": "tsc -p tsconfig.json",
+    "build": "tsc -p tsconfig.build.json",
     "runner:once": "tsx src/cli.ts run-once",
+    "runner:llm-check": "tsx src/llm-check.ts",
     "runner:full": "bash scripts/run_full_push.sh",
     "runner:daemon": "tsx src/cli.ts daemon",
     "runner:schedule:print": "tsx src/cli.ts schedule-print",
