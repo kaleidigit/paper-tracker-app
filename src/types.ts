@@ -5,10 +5,12 @@ export interface Paper {
   title_en: string;
   title_zh?: string;
   authors?: string[];
+  author_affiliations?: string[];
   journal?: { name?: string; source_group?: string };
   published_date?: string;
   doi?: string;
   url?: string;
+  image_url?: string;
   abstract_original?: string;
   abstract_zh?: string;
   publication_type?: string;

@@ -6,7 +6,7 @@ import type { AppConfig, RunState, MetricsState } from "./types.js";
 dotenv.config();
 
 const ROOT_DIR = process.cwd();
-const CONFIG_PATH = process.env.CONFIG_PATH || path.join(ROOT_DIR, "config.json");
+const CONFIG_PATH = process.env.CONFIG_PATH || path.join(ROOT_DIR, "config", "config.json");
 
 function asNumber(input: unknown, fallback: number): number {
   if (typeof input === "number" && Number.isFinite(input)) {
@@ -65,7 +65,7 @@ export async function loadAppConfig(): Promise<AppConfig> {
   parsed.sources = parsed.sources || {};
   parsed.sources.keywords = Array.isArray(parsed.sources.keywords) ? parsed.sources.keywords : [];
   parsed.sources.openalex_queries = Array.isArray(parsed.sources.openalex_queries) ? parsed.sources.openalex_queries : [];
-  parsed.sources.journals_file = parsed.sources.journals_file || "journals.json";
+  parsed.sources.journals_file = parsed.sources.journals_file || "config/journals.json";
   parsed.feishu = parsed.feishu || {};
   parsed.feishu.alert_enabled = Boolean(parsed.feishu.alert_enabled ?? true);
   parsed.feishu.alert_message_template =

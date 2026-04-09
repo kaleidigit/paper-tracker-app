@@ -42,7 +42,7 @@
 
 ### 3.2 配置原则
 
-- 所有非敏感、人工常改的配置统一放到 `config.json`
+- 所有非敏感、人工常改的配置统一放到 `config/config.json`
 - 所有密钥、token、密码保留在 `.env`
 - 不要继续增加分散在多处的业务配置
 
@@ -90,7 +90,7 @@
 
 后续默认应引入并维护：
 
-- [config.json](/Users/kaleid/Documents/Playground/config.json)
+- [config/config.json](/Users/kaleid/Documents/paper-tracker-app/config/config.json)
 
 未来应由它统一管理：
 
@@ -201,7 +201,7 @@
 
 1. 这次改的是文档、配置、代码，还是调度编排
 2. 这次改动会不会影响 JSON schema
-3. 这次改动会不会影响 `config.json`
+3. 这次改动会不会影响 `config/config.json`
 4. 这次改动后要怎么验证
 
 如果这四点说不清，不应该直接开始大改。

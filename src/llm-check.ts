@@ -5,7 +5,7 @@ import path from "node:path";
 dotenv.config();
 
 async function main(): Promise<void> {
-  const configPath = process.env.CONFIG_PATH || path.join(process.cwd(), "config.json");
+  const configPath = process.env.CONFIG_PATH || path.join(process.cwd(), "config", "config.json");
   const config = JSON.parse(await fs.readFile(configPath, "utf-8"));
   const baseUrl = String(config.ai?.base_url || "").trim();
   const model = String(config.ai?.translation?.model || config.ai?.model || "").trim();

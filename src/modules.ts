@@ -23,6 +23,27 @@ function dedupeStrings(values: string[]): string[] {
   return result;
 }
 
+function asStringList(value: unknown): string[] {
+  if (!value) {
+    return [];
+  }
+  if (Array.isArray(value)) {
+    return value.flatMap((item) => asStringList(item));
+  }
+  if (typeof value === "object") {
+    const record = value as Record<string, unknown>;
+    return [
+      ...asStringList(record.name),
+      ...asStringList(record["#text"]),
+      ...asStringList(record.content),
+      ...asStringList(record.url),
+      ...asStringList(record.href),
+      ...asStringList(record.src)
+    ];
+  }
+  return [normalizeText(value)];
+}
+
 function parseDate(value: unknown): string {
   const input = normalizeText(value);
   const date = new Date(input);
@@ -48,6 +69,21 @@ function formatDateInTz(date: Date, timezone: string): string {
   return formatter.format(date);
 }
 
+function absoluteUrl(raw: string, base?: string): string {
+  const url = normalizeText(raw);
+  if (!url) {
+    return "";
+  }
+  try {
+    if (base) {
+      return new URL(url, base).toString();
+    }
+    return new URL(url).toString();
+  } catch {
+    return url;
+  }
+}
+
 function itemKey(paper: Paper): string {
   return normalizeText(paper.doi) || normalizeText(paper.url) || `${normalizeText(paper.journal?.name)}::${paper.title_en}`;
 }
@@ -69,6 +105,36 @@ function restoreAbstract(index: Record<string, number[]> | undefined): string {
     .join(" ");
 }
 
+function extractImageFromRssItem(item: JsonRecord): string {
+  const candidates: unknown[] = [
+    item["media:content"],
+    item["media:thumbnail"],
+    item.enclosure,
+    item.image,
+    item["itunes:image"],
+    item["content:encoded"]
+  ];
+  for (const candidate of candidates) {
+    const urls = dedupeStrings(asStringList(candidate));
+    const match = urls.find((u) => /\.(png|jpe?g|gif|webp|svg)(\?|$)/i.test(u) || /^https?:\/\//i.test(u));
+    if (match) {
+      return absoluteUrl(match, normalizeText(item.link));
+    }
+  }
+  return "";
+}
+
+function extractAffiliationsFromRssItem(item: JsonRecord): string[] {
+  const candidates: unknown[] = [
+    item["prism:affiliation"],
+    item.affiliation,
+    item["dc:publisher"],
+    item["dc:source"],
+    item["author:affiliation"]
+  ];
+  return dedupeStrings(candidates.flatMap((candidate) => asStringList(candidate))).filter(Boolean);
+}
+
 function toArray<T>(value: T | T[] | undefined): T[] {
   if (!value) {
     return [];
@@ -77,14 +143,14 @@ function toArray<T>(value: T | T[] | undefined): T[] {
 }
 
 async function loadJournals(config: AppConfig): Promise<Array<Record<string, unknown>>> {
-  const journalFile = resolvePath(config.sources?.journals_file || "journals.json");
+  const journalFile = resolvePath(config.sources?.journals_file || "config/journals.json");
   const raw = await fs.readFile(journalFile, "utf-8");
   const parsed = JSON.parse(raw);
   return Array.isArray(parsed) ? parsed : [];
 }
 
 async function loadTaxonomy(config: AppConfig): Promise<Array<Record<string, unknown>>> {
-  const file = resolvePath(config.classification?.file || "classification.json");
+  const file = resolvePath(config.classification?.file || "config/classification.json");
   const raw = await fs.readFile(file, "utf-8");
   const parsed = JSON.parse(raw) as { domains?: Array<Record<string, unknown>> };
   return Array.isArray(parsed.domains) ? parsed.domains : [];
@@ -262,12 +328,14 @@ function normalizePublicationType(value: unknown): string {
 function buildPaper(input: {
   title: string;
   authors: string[];
+  authorAffiliations?: string[];
   journal: string;
   sourceGroup: string;
   publishedDate: string;
   doi: string;
   url: string;
   abstractOriginal: string;
+  imageUrl?: string;
   publicationType: string;
   sourceProvider: string;
   rawFeed: string;
@@ -282,6 +350,7 @@ function buildPaper(input: {
     title_en: titleEn,
     title_zh: "",
     authors: dedupeStrings(input.authors),
+    author_affiliations: dedupeStrings(input.authorAffiliations || []),
     journal: {
       name: normalizeText(input.journal),
       source_group: normalizeText(input.sourceGroup || input.journal)
@@ -289,6 +358,7 @@ function buildPaper(input: {
     published_date: input.publishedDate,
     doi: normalizeText(input.doi),
     url: normalizeText(input.url),
+    image_url: normalizeText(input.imageUrl),
     abstract_original: abs,
     abstract_zh: "",
     publication_type: normalizePublicationType(input.publicationType),
@@ -362,12 +432,14 @@ async function collectNature(config: AppConfig, taxonomy: Array<Record<string, u
           buildPaper({
             title,
             authors: toArray(item.author as string[] | undefined),
+            authorAffiliations: extractAffiliationsFromRssItem(item),
             journal,
             sourceGroup: "Nature",
             publishedDate,
             doi: normalizeText(item["dc:identifier"]),
             url: normalizeText(item.link),
             abstractOriginal: summary,
+            imageUrl: extractImageFromRssItem(item),
             publicationType: normalizeText(
               item["dc:type"] || item["prism:publicationType"] || item["prism:section"] || item.category
             ),
@@ -429,10 +501,16 @@ async function collectOpenalex(config: AppConfig, taxonomy: Array<Record<string,
           }
         }
         const authorships = toArray(item.authorships as JsonRecord[] | undefined);
+        const authorAffiliations = dedupeStrings(
+          authorships.flatMap((a) =>
+            toArray((a.institutions as JsonRecord[] | undefined)?.map((inst) => normalizeText(inst.display_name))).filter(Boolean)
+          )
+        );
         papers.push(
           buildPaper({
             title,
             authors: authorships.map((a) => normalizeText(((a.author as JsonRecord | undefined)?.display_name) || "")),
+            authorAffiliations,
             journal: journal || "Unknown Journal",
             sourceGroup: normalizeText(source?.host_organization_name || journal),
             publishedDate,
@@ -485,10 +563,34 @@ function extractPublicationTypeFromHtml(html: string): string {
   return "unknown";
 }
 
-async function resolvePublicationTypeByUrl(url: string, timeoutMs: number): Promise<string> {
+function extractImageFromHtml(html: string, pageUrl: string): string {
+  const patterns = [
+    /property=["']og:image["'][^>]*content=["']([^"']+)["']/i,
+    /name=["']twitter:image["'][^>]*content=["']([^"']+)["']/i,
+    /name=["']citation_cover_image["'][^>]*content=["']([^"']+)["']/i
+  ];
+  for (const pattern of patterns) {
+    const match = html.match(pattern);
+    if (match?.[1]) {
+      return absoluteUrl(match[1], pageUrl);
+    }
+  }
+  return "";
+}
+
+function extractAffiliationsFromHtml(html: string): string[] {
+  const matches = html.matchAll(/name=["']citation_author_institution["'][^>]*content=["']([^"']+)["']/gi);
+  const affiliations = Array.from(matches).map((m) => normalizeText(m[1]));
+  return dedupeStrings(affiliations).filter(Boolean);
+}
+
+async function resolveMetadataByUrl(
+  url: string,
+  timeoutMs: number
+): Promise<{ publicationType: string; imageUrl: string; authorAffiliations: string[] }> {
   const articleUrl = normalizeText(url);
   if (!articleUrl) {
-    return "unknown";
+    return { publicationType: "unknown", imageUrl: "", authorAffiliations: [] };
   }
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
@@ -498,49 +600,74 @@ async function resolvePublicationTypeByUrl(url: string, timeoutMs: number): Prom
       headers: { "user-agent": "paper-tracker/1.0 (+https://local)" }
     });
     if (!response.ok) {
-      return "unknown";
+      return { publicationType: "unknown", imageUrl: "", authorAffiliations: [] };
     }
     const html = await response.text();
-    return extractPublicationTypeFromHtml(html);
+    return {
+      publicationType: extractPublicationTypeFromHtml(html),
+      imageUrl: extractImageFromHtml(html, articleUrl),
+      authorAffiliations: extractAffiliationsFromHtml(html)
+    };
   } catch {
-    return "unknown";
+    return { publicationType: "unknown", imageUrl: "", authorAffiliations: [] };
   } finally {
     clearTimeout(timer);
   }
 }
 
-async function enrichPublicationTypes(config: AppConfig, papers: Paper[]): Promise<Paper[]> {
+async function enrichPaperMetadata(config: AppConfig, papers: Paper[]): Promise<Paper[]> {
   const doiCache = new Map<string, string>();
-  const urlCache = new Map<string, string>();
+  const urlCache = new Map<string, { publicationType: string; imageUrl: string; authorAffiliations: string[] }>();
   const result: Paper[] = [];
   for (const paper of papers) {
     const current = normalizePublicationType(paper.publication_type);
-    if (current !== "unknown") {
-      result.push({ ...paper, publication_type: current });
-      continue;
-    }
-    const rawDoi = normalizeText(paper.doi);
-    let resolved = "unknown";
-    if (rawDoi) {
-      const cacheKey = rawDoi.toLowerCase();
-      if (!doiCache.has(cacheKey)) {
-        const fromDoi = await resolvePublicationTypeByDoi(rawDoi, config.runtime.command_timeout_ms);
-        doiCache.set(cacheKey, fromDoi);
+    const hasImage = Boolean(normalizeText(paper.image_url));
+    const hasAffiliations = (paper.author_affiliations || []).length > 0;
+
+    let resolvedType = current;
+    let resolvedImage = normalizeText(paper.image_url);
+    let resolvedAffiliations = dedupeStrings(paper.author_affiliations || []);
+
+    if (resolvedType === "unknown") {
+      const rawDoi = normalizeText(paper.doi);
+      if (rawDoi) {
+        const cacheKey = rawDoi.toLowerCase();
+        if (!doiCache.has(cacheKey)) {
+          const fromDoi = await resolvePublicationTypeByDoi(rawDoi, config.runtime.command_timeout_ms);
+          doiCache.set(cacheKey, fromDoi);
+        }
+        resolvedType = doiCache.get(cacheKey) || "unknown";
       }
-      resolved = doiCache.get(cacheKey) || "unknown";
     }
-    if (resolved === "unknown") {
+
+    if (resolvedType === "unknown" || !hasImage || !hasAffiliations) {
       const rawUrl = normalizeText(paper.url);
       if (rawUrl) {
         const urlKey = rawUrl.toLowerCase();
         if (!urlCache.has(urlKey)) {
-          const fromUrl = await resolvePublicationTypeByUrl(rawUrl, config.runtime.command_timeout_ms);
-          urlCache.set(urlKey, fromUrl);
+          const meta = await resolveMetadataByUrl(rawUrl, config.runtime.command_timeout_ms);
+          urlCache.set(urlKey, meta);
         }
-        resolved = urlCache.get(urlKey) || "unknown";
+        const meta = urlCache.get(urlKey);
+        if (meta) {
+          if (resolvedType === "unknown") {
+            resolvedType = meta.publicationType;
+          }
+          if (!resolvedImage) {
+            resolvedImage = meta.imageUrl;
+          }
+          if (resolvedAffiliations.length === 0 && meta.authorAffiliations.length > 0) {
+            resolvedAffiliations = meta.authorAffiliations;
+          }
+        }
       }
     }
-    result.push({ ...paper, publication_type: resolved });
+    result.push({
+      ...paper,
+      publication_type: normalizePublicationType(resolvedType),
+      image_url: resolvedImage,
+      author_affiliations: resolvedAffiliations
+    });
   }
   return result;
 }
@@ -560,7 +687,7 @@ export async function fetchPapers(config: AppConfig): Promise<Paper[]> {
     seen.add(key);
     return true;
   });
-  return enrichPublicationTypes(config, deduped);
+  return enrichPaperMetadata(config, deduped);
 }
 
 async function translatePaperFields(config: AppConfig, paper: Paper): Promise<Pick<Paper, "title_zh" | "abstract_zh">> {
@@ -730,10 +857,12 @@ async function runTemplate(config: AppConfig, template: string, vars: Record<str
 export async function publishDigest(config: AppConfig, payload: PublishPayload): Promise<JsonRecord> {
   const feishu = config.feishu || {};
   const dataDir = resolvePath(feishu.data_dir || "data/feishu-publisher");
-  await fs.mkdir(dataDir, { recursive: true });
+  const timezone = config.app?.timezone || "Asia/Shanghai";
+  const dayDir = path.join(dataDir, formatDateInTz(new Date(), timezone));
+  await fs.mkdir(dayDir, { recursive: true });
   const stamp = new Date().toISOString().replace(/[-:T]/g, "").slice(0, 15);
   const safeTitle = payload.title.replace(/[^\p{L}\p{N}_-]+/gu, "-").slice(0, 60);
-  const base = path.join(dataDir, `${stamp}-${safeTitle}`);
+  const base = path.join(dayDir, `${stamp}-${safeTitle}`);
   const markdownFile = `${base}.md`;
   const recordsFile = `${base}.json`;
   const papersFile = `${base}-papers.json`;

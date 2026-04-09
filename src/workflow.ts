@@ -27,6 +27,8 @@ export function buildMarkdown(title: string, papers: Paper[]): string {
     const journal = paper.journal?.name || "";
     lines.push(`## ${index + 1}. ${paper.title_zh || paper.title_en}`);
     lines.push(`- 英文标题: ${paper.title_en || ""}`);
+    lines.push(`- 作者: ${(paper.authors || []).join(", ")}`);
+    lines.push(`- 作者单位: ${(paper.author_affiliations || []).join("; ")}`);
     lines.push(`- 期刊: ${journal}`);
     lines.push(`- 日期: ${paper.published_date || ""}`);
     lines.push(`- 类型: ${paper.publication_type || "unknown"}`);
@@ -37,6 +39,7 @@ export function buildMarkdown(title: string, papers: Paper[]): string {
     lines.push(`- 摘要总结: ${paper.summary_zh || ""}`);
     lines.push(`- DOI: ${paper.doi || "N/A"}`);
     lines.push(`- 链接: ${paper.url || ""}`);
+    lines.push(`- 主图: ${paper.image_url || ""}`);
     lines.push("");
   });
   return lines.join("\n");
@@ -47,6 +50,7 @@ export function buildRecords(papers: Paper[]): JsonRecord[] {
     title_en: paper.title_en || "",
     title_zh: paper.title_zh || "",
     authors: (paper.authors || []).join(", "),
+    author_affiliations: (paper.author_affiliations || []).join("; "),
     journal: paper.journal?.name || "",
     source_group: paper.journal?.source_group || "",
     published_date: paper.published_date || "",
@@ -59,7 +63,8 @@ export function buildRecords(papers: Paper[]): JsonRecord[] {
     novelty_points: (paper.novelty_points || []).join("\n"),
     main_content: (paper.main_content || []).join("\n"),
     doi: paper.doi || "",
-    url: paper.url || ""
+    url: paper.url || "",
+    image_url: paper.image_url || ""
   }));
 }
 
