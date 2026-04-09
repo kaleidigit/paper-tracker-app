@@ -29,6 +29,13 @@
 - 分类字段：`classification.domain`、`classification.subdomain`、`classification.tags`。
 - 类型字段：`publication_type`（RSS -> OpenAlex -> HTML meta 兜底回填）。
 
+默认运行策略（LLM 仅做必要任务）：
+- `ai.filter.enabled=true`：LLM 负责判断论文是否保留。
+- `ai.enrich.enabled=true`：LLM 仅负责领域分类（`classification`），不生成长文本。
+- `ai.translation.enabled=true`：LLM 仅负责 `title_zh` 与 `abstract_zh` 翻译。
+- `summary_zh`、`novelty_points`、`main_content` 默认清空，不再生成。
+- 翻译 prompt 在 `config/config.json -> ai.prompts.translation_system / translation_user_template` 中可直接修改。
+
 ## 首次部署
 ### 一键部署（仅部署）
 
@@ -53,6 +60,11 @@ cp config/.env.cn.example .env
 ```bash
 ./scripts/push.sh
 ```
+
+说明：
+- 默认可直接执行 `push.sh`，不会强制要求每次重新扫码授权。
+- 若你确实依赖 user 身份接口，可设置 `PUSH_REQUIRE_LARK_AUTH=1` 强制校验登录态。
+- 一般情况下（`--as bot` 推送）只要 `config/.env` 与飞书应用配置正确即可日常自动运行。
 
 ### 故障复现与根因（`keychain not initialized`）
 - 触发条件：首次安装、`~/.lark-cli/keychain.json` 不存在、无图形界面终端、CI 新环境。
@@ -130,6 +142,15 @@ npm run runner:schedule:print
 npm run runner:schedule:install
 npm test
 ```
+
+### 运行可观测性与防卡住
+- 终端会输出阶段日志：`workflow.fetch.*`、`workflow.enrich.*`、`workflow.publish.*`。
+- 当看到持续停留在 `workflow.fetch.filter.start`，说明在执行 LLM 复筛，不是进程卡死。
+- 可通过 `config/config.json -> ai.filter.max_checks_per_run` 限制单次运行的 LLM 复筛次数（默认 `8`），缩短总耗时。
+
+### Nature 作者信息抓取
+- 对 `nature.com/articles/*` 链接，会在入库时额外抓取论文页，优先解析 `Author information` 区域与 `citation_author/citation_author_institution` 元标签。
+- 当页面未提供完整字段时，才回退 RSS 原始作者与机构信息。
 
 ### 运行结果检查
 - `data/ts-runner/state.json`：最近一次状态。

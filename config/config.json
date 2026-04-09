@@ -41,6 +41,9 @@
       "api_key_env": "SILICONFLOW_API_KEY",
       "required": true
     },
+    "enrich": {
+      "enabled": true
+    },
     "temperature": 0.2,
     "max_tokens": 2000,
     "filter": {
@@ -49,11 +52,14 @@
       "model": "deepseek-ai/DeepSeek-V3.2",
       "temperature": 0.0,
       "max_tokens": 500,
-      "min_confidence": 0.5
+      "min_confidence": 0.5,
+      "max_checks_per_run": 8
     },
     "prompts": {
-      "enrich_system": "你是环境、能源领域的科研情报编辑。请严格输出 JSON，字段为 title_zh, abstract_zh, summary_zh, novelty_points, main_content, classification。其中 novelty_points 和 main_content 必须是长度为 3 的字符串数组。classification 必须包含 domain, subdomain, tags，tags 必须是数组。请从给定分类树中选择最合适的领域与子领域。若不确定，可使用最接近的领域。分类树如下：{{taxonomy_json}}",
-      "enrich_user_template": "{{paper_json}}",
+      "classify_system": "你是环境与能源论文分类助手。请严格输出 JSON，字段必须为 classification，且 classification 必须包含 domain, subdomain, tags(array)。只能从给定分类树中选择 domain/subdomain。若不确定可选择最接近项。分类树如下：{{taxonomy_json}}",
+      "classify_user_template": "{{paper_json}}",
+      "translation_system": "你是学术翻译助手。请只输出 JSON，字段为 title_zh 和 abstract_zh。要求忠实、简洁、术语准确，不要添加额外解释。",
+      "translation_user_template": "{{paper_json}}",
       "filter_system": "你是环境、能源与气候方向的论文筛选器。请根据论文信息判断是否应纳入日报。只输出 JSON，字段必须为 keep(boolean), confidence(0~1), reason(string), suggested_domain(string), suggested_tags(array)。若与环境/能源/气候/可持续发展明显相关，则 keep=true，否则 false。",
       "filter_user_template": "关键词参考：{{keywords_json}}\n分类树参考：{{taxonomy_json}}\n待判断论文：{{paper_json}}"
     }

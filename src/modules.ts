@@ -224,6 +224,26 @@ async function fetchText(url: string, timeoutMs: number): Promise<string> {
   }
 }
 
+async function postJsonWithTimeout(
+  url: string,
+  body: JsonRecord,
+  headers: Record<string, string>,
+  timeoutMs: number
+): Promise<Response> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    return await fetch(url, {
+      method: "POST",
+      headers,
+      body: JSON.stringify(body),
+      signal: controller.signal
+    });
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 function aiApiKey(config: AppConfig): string {
   const env = config.ai?.api_key_env || "SILICONFLOW_API_KEY";
   const key = process.env[env] || process.env.OPENAI_API_KEY || process.env.OPENAI_COMPATIBLE_API_KEY || "";
@@ -246,19 +266,63 @@ function renderTemplate(template: string, values: Record<string, string>): strin
   return Object.entries(values).reduce((acc, [key, value]) => acc.replaceAll(`{{${key}}}`, value), template);
 }
 
+function parseJsonLenient(text: string): JsonRecord {
+  const raw = normalizeText(text);
+  if (!raw) {
+    return {};
+  }
+  try {
+    return JSON.parse(raw) as JsonRecord;
+  } catch {
+    const codeBlock = raw.match(/```(?:json)?\s*([\s\S]*?)\s*```/i);
+    if (codeBlock?.[1]) {
+      try {
+        return JSON.parse(codeBlock[1]) as JsonRecord;
+      } catch {
+        // continue
+      }
+    }
+    const obj = raw.match(/\{[\s\S]*\}/);
+    if (obj?.[0]) {
+      try {
+        return JSON.parse(obj[0]) as JsonRecord;
+      } catch {
+        // ignore
+      }
+    }
+  }
+  return {};
+}
+
+function sourceFetchTimeoutMs(config: AppConfig): number {
+  // 外部源抓取默认采用更短超时，避免 run-once 长时间“无输出”挂起
+  return Math.max(5000, Math.min(config.runtime.command_timeout_ms, 30000));
+}
+
+function shouldSkipLlmRescueByTitle(title: string): boolean {
+  const t = normalizeText(title).toLowerCase();
+  if (!t) {
+    return true;
+  }
+  return /(author correction|publisher correction|retraction|briefing chat|career column|podcast|news & views|research briefing)/i.test(
+    t
+  );
+}
+
 async function chatJson(config: AppConfig, payload: JsonRecord): Promise<JsonRecord> {
   const baseUrl = normalizeText(config.ai?.base_url);
   if (!baseUrl) {
     throw new Error("Missing ai.base_url");
   }
-  const response = await fetch(`${baseUrl.replace(/\/$/, "")}/chat/completions`, {
-    method: "POST",
-    headers: {
+  const response = await postJsonWithTimeout(
+    `${baseUrl.replace(/\/$/, "")}/chat/completions`,
+    payload,
+    {
       "Content-Type": "application/json",
       Authorization: `Bearer ${aiApiKey(config)}`
     },
-    body: JSON.stringify(payload)
-  });
+    config.runtime.command_timeout_ms
+  );
   if (!response.ok) {
     const body = normalizeText(await response.text());
     throw new Error(`AI request failed: HTTP ${response.status}; body=${body}`);
@@ -266,13 +330,21 @@ async function chatJson(config: AppConfig, payload: JsonRecord): Promise<JsonRec
   const json = (await response.json()) as JsonRecord;
   const choices = toArray(json.choices as JsonRecord[] | undefined);
   const content = normalizeText(((choices[0] as JsonRecord | undefined)?.message as JsonRecord | undefined)?.content);
-  return JSON.parse(content || "{}") as JsonRecord;
+  return parseJsonLenient(content);
 }
 
 async function llmFilter(config: AppConfig, taxonomy: Array<Record<string, unknown>>, candidate: Paper): Promise<JsonRecord> {
   if (!config.ai?.filter?.enabled) {
     return { used: false, keep: false, confidence: 0 };
   }
+  process.stdout.write(
+    `${JSON.stringify({
+      timestamp: new Date().toISOString(),
+      level: "INFO",
+      event: "workflow.fetch.filter.start",
+      title: candidate.title_en || ""
+    })}\n`
+  );
   const prompts = config.ai?.prompts || {};
   const values = {
     taxonomy_json: JSON.stringify(taxonomy),
@@ -299,6 +371,15 @@ async function llmFilter(config: AppConfig, taxonomy: Array<Record<string, unkno
   const confidence = Number(parsed.confidence ?? 0);
   const min = Number(config.ai?.filter?.min_confidence ?? 0.5);
   const keep = Boolean(parsed.keep) && confidence >= min;
+  process.stdout.write(
+    `${JSON.stringify({
+      timestamp: new Date().toISOString(),
+      level: "INFO",
+      event: "workflow.fetch.filter.done",
+      keep,
+      confidence
+    })}\n`
+  );
   return { ...parsed, used: true, keep, confidence };
 }
 
@@ -390,15 +471,24 @@ function resolveFeedItems(parsed: JsonRecord): JsonRecord[] {
   return [];
 }
 
-async function collectNature(config: AppConfig, taxonomy: Array<Record<string, unknown>>): Promise<Paper[]> {
+async function collectNature(
+  config: AppConfig,
+  taxonomy: Array<Record<string, unknown>>,
+  filterBudget: { remaining: number }
+): Promise<Paper[]> {
   const journals = await loadJournals(config);
   const feeds = journals.flatMap((j) => toArray(j.rss_feeds as string[] | undefined));
   const parser = new XMLParser({ ignoreAttributes: false, attributeNamePrefix: "" });
   const start = strictWindowStartAt(config);
   const papers: Paper[] = [];
+  const timeoutMs = sourceFetchTimeoutMs(config);
+  const authorInfoCache = new Map<string, { authors: string[]; affiliations: string[]; imageUrl: string }>();
   for (const feedUrl of feeds) {
+    process.stdout.write(
+      `${JSON.stringify({ timestamp: new Date().toISOString(), level: "INFO", event: "workflow.fetch.rss.start", feed: feedUrl })}\n`
+    );
     try {
-      const xml = await fetchText(feedUrl, config.runtime.command_timeout_ms);
+      const xml = await fetchText(feedUrl, timeoutMs);
       const parsed = parser.parse(xml) as JsonRecord;
       const items = resolveFeedItems(parsed);
       const parsedItems = items.map((item) => {
@@ -416,6 +506,13 @@ async function collectNature(config: AppConfig, taxonomy: Array<Record<string, u
           continue;
         }
         if (!matchesKeywords(config, title, summary, journal)) {
+          if (shouldSkipLlmRescueByTitle(title)) {
+            continue;
+          }
+          if (filterBudget.remaining <= 0) {
+            continue;
+          }
+          filterBudget.remaining -= 1;
           const filterResult = await llmFilter(config, taxonomy, {
             title_en: title,
             journal: { name: journal },
@@ -428,18 +525,25 @@ async function collectNature(config: AppConfig, taxonomy: Array<Record<string, u
             continue;
           }
         }
+        const paperUrl = normalizeText(item.link);
+        const urlKey = paperUrl.toLowerCase();
+        if (!authorInfoCache.has(urlKey)) {
+          authorInfoCache.set(urlKey, await resolveNatureAuthorInfoByUrl(paperUrl, timeoutMs));
+        }
+        const authorInfo = authorInfoCache.get(urlKey) || { authors: [], affiliations: [], imageUrl: "" };
         papers.push(
           buildPaper({
             title,
-            authors: toArray(item.author as string[] | undefined),
-            authorAffiliations: extractAffiliationsFromRssItem(item),
+            authors: authorInfo.authors.length > 0 ? authorInfo.authors : toArray(item.author as string[] | undefined),
+            authorAffiliations:
+              authorInfo.affiliations.length > 0 ? authorInfo.affiliations : extractAffiliationsFromRssItem(item),
             journal,
             sourceGroup: "Nature",
             publishedDate,
             doi: normalizeText(item["dc:identifier"]),
-            url: normalizeText(item.link),
+            url: paperUrl,
             abstractOriginal: summary,
-            imageUrl: extractImageFromRssItem(item),
+            imageUrl: authorInfo.imageUrl || extractImageFromRssItem(item),
             publicationType: normalizeText(
               item["dc:type"] || item["prism:publicationType"] || item["prism:section"] || item.category
             ),
@@ -450,14 +554,35 @@ async function collectNature(config: AppConfig, taxonomy: Array<Record<string, u
           })
         );
       }
+      process.stdout.write(
+        `${JSON.stringify({
+          timestamp: new Date().toISOString(),
+          level: "INFO",
+          event: "workflow.fetch.rss.done",
+          feed: feedUrl,
+          papers: papers.length
+        })}\n`
+      );
     } catch {
+      process.stdout.write(
+        `${JSON.stringify({
+          timestamp: new Date().toISOString(),
+          level: "WARN",
+          event: "workflow.fetch.rss.failed",
+          feed: feedUrl
+        })}\n`
+      );
       continue;
     }
   }
   return papers;
 }
 
-async function collectOpenalex(config: AppConfig, taxonomy: Array<Record<string, unknown>>): Promise<Paper[]> {
+async function collectOpenalex(
+  config: AppConfig,
+  taxonomy: Array<Record<string, unknown>>,
+  filterBudget: { remaining: number }
+): Promise<Paper[]> {
   const journals = await loadJournals(config);
   const issns = dedupeStrings(journals.map((j) => normalizeText(j.issn)).filter(Boolean));
   const queries = toArray(config.sources?.openalex_queries).length
@@ -468,18 +593,22 @@ async function collectOpenalex(config: AppConfig, taxonomy: Array<Record<string,
   const select =
     "id,title,doi,publication_date,type,authorships,primary_location,abstract_inverted_index";
   const papers: Paper[] = [];
+  const timeoutMs = sourceFetchTimeoutMs(config);
   const baseFilters = [`from_publication_date:${startDate}`, "type:article"];
   if (issns.length > 0) {
     baseFilters.push(`primary_location.source.issn:${issns.join("|")}`);
   }
   for (const query of queries) {
+    process.stdout.write(
+      `${JSON.stringify({ timestamp: new Date().toISOString(), level: "INFO", event: "workflow.fetch.openalex.start", query })}\n`
+    );
     const url =
       "https://api.openalex.org/works?per-page=25&sort=publication_date:desc" +
       `&filter=${encodeURIComponent(baseFilters.join(","))}` +
       `&search=${encodeURIComponent(query)}` +
       `&select=${encodeURIComponent(select)}`;
     try {
-      const payload = await fetchJson(url, config.runtime.command_timeout_ms);
+      const payload = await fetchJson(url, timeoutMs);
       const results = toArray(payload.results as JsonRecord[] | undefined);
       for (const item of results) {
         const source = (item.primary_location as JsonRecord | undefined)?.source as JsonRecord | undefined;
@@ -488,6 +617,13 @@ async function collectOpenalex(config: AppConfig, taxonomy: Array<Record<string,
         const abstract = normalizeText(restoreAbstract(item.abstract_inverted_index as Record<string, number[]> | undefined));
         const publishedDate = parseDate(item.publication_date);
         if (!matchesKeywords(config, title, abstract, journal)) {
+          if (shouldSkipLlmRescueByTitle(title)) {
+            continue;
+          }
+          if (filterBudget.remaining <= 0) {
+            continue;
+          }
+          filterBudget.remaining -= 1;
           const filterResult = await llmFilter(config, taxonomy, {
             title_en: title,
             journal: { name: journal },
@@ -525,7 +661,24 @@ async function collectOpenalex(config: AppConfig, taxonomy: Array<Record<string,
           })
         );
       }
+      process.stdout.write(
+        `${JSON.stringify({
+          timestamp: new Date().toISOString(),
+          level: "INFO",
+          event: "workflow.fetch.openalex.done",
+          query,
+          papers: papers.length
+        })}\n`
+      );
     } catch {
+      process.stdout.write(
+        `${JSON.stringify({
+          timestamp: new Date().toISOString(),
+          level: "WARN",
+          event: "workflow.fetch.openalex.failed",
+          query
+        })}\n`
+      );
       continue;
     }
   }
@@ -582,6 +735,55 @@ function extractAffiliationsFromHtml(html: string): string[] {
   const matches = html.matchAll(/name=["']citation_author_institution["'][^>]*content=["']([^"']+)["']/gi);
   const affiliations = Array.from(matches).map((m) => normalizeText(m[1]));
   return dedupeStrings(affiliations).filter(Boolean);
+}
+
+function extractAuthorsFromHtml(html: string): string[] {
+  const citationMatches = html.matchAll(/name=["']citation_author["'][^>]*content=["']([^"']+)["']/gi);
+  const citationAuthors = dedupeStrings(Array.from(citationMatches).map((m) => normalizeText(m[1]))).filter(Boolean);
+  if (citationAuthors.length > 0) {
+    return citationAuthors;
+  }
+  const sectionMatch =
+    html.match(/<section[^>]*id=["']author-information["'][\s\S]*?<\/section>/i) ||
+    html.match(/<h2[^>]*>\s*Author information\s*<\/h2>[\s\S]*?(<section[\s\S]*?<\/section>|<div[\s\S]*?<\/div>)/i);
+  if (!sectionMatch?.[0]) {
+    return [];
+  }
+  const names = Array.from(sectionMatch[0].matchAll(/<a[^>]*data-test=["']author-name["'][^>]*>([^<]+)<\/a>/gi)).map((m) =>
+    normalizeText(m[1])
+  );
+  return dedupeStrings(names).filter(Boolean);
+}
+
+async function resolveNatureAuthorInfoByUrl(
+  url: string,
+  timeoutMs: number
+): Promise<{ authors: string[]; affiliations: string[]; imageUrl: string }> {
+  const articleUrl = normalizeText(url);
+  if (!articleUrl || !/nature\.com\/articles\//i.test(articleUrl)) {
+    return { authors: [], affiliations: [], imageUrl: "" };
+  }
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    const response = await fetch(articleUrl, {
+      signal: controller.signal,
+      headers: { "user-agent": "paper-tracker/1.0 (+https://local)" }
+    });
+    if (!response.ok) {
+      return { authors: [], affiliations: [], imageUrl: "" };
+    }
+    const html = await response.text();
+    return {
+      authors: extractAuthorsFromHtml(html),
+      affiliations: extractAffiliationsFromHtml(html),
+      imageUrl: extractImageFromHtml(html, articleUrl)
+    };
+  } catch {
+    return { authors: [], affiliations: [], imageUrl: "" };
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 async function resolveMetadataByUrl(
@@ -674,8 +876,19 @@ async function enrichPaperMetadata(config: AppConfig, papers: Paper[]): Promise<
 
 export async function fetchPapers(config: AppConfig): Promise<Paper[]> {
   const taxonomy = await loadTaxonomy(config);
-  const nature = await collectNature(config, taxonomy);
-  const openalex = await collectOpenalex(config, taxonomy);
+  const filterBudget = {
+    remaining: Math.max(0, Number(config.ai?.filter?.max_checks_per_run ?? 20))
+  };
+  process.stdout.write(
+    `${JSON.stringify({
+      timestamp: new Date().toISOString(),
+      level: "INFO",
+      event: "workflow.fetch.filter.budget",
+      remaining: filterBudget.remaining
+    })}\n`
+  );
+  const nature = await collectNature(config, taxonomy, filterBudget);
+  const openalex = await collectOpenalex(config, taxonomy, filterBudget);
   const papers = [...nature, ...openalex];
   const seen = new Set<string>();
   const ordered = papers.sort((a, b) => `${b.published_date}`.localeCompare(`${a.published_date}`));
@@ -691,7 +904,7 @@ export async function fetchPapers(config: AppConfig): Promise<Paper[]> {
 }
 
 async function translatePaperFields(config: AppConfig, paper: Paper): Promise<Pick<Paper, "title_zh" | "abstract_zh">> {
-  if (!config.ai?.translation?.enabled) {
+  if (config.ai?.translation?.enabled === false) {
     return { title_zh: paper.title_zh || "", abstract_zh: paper.abstract_zh || "" };
   }
   const baseUrl = normalizeText(config.ai?.base_url);
@@ -699,48 +912,122 @@ async function translatePaperFields(config: AppConfig, paper: Paper): Promise<Pi
   if (!baseUrl || !model) {
     return { title_zh: paper.title_zh || "", abstract_zh: paper.abstract_zh || "" };
   }
-  const response = await fetch(`${baseUrl.replace(/\/$/, "")}/chat/completions`, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      Authorization: `Bearer ${translationApiKey(config)}`
-    },
-    body: JSON.stringify({
-      model,
-      temperature: 0,
-      max_tokens: 1200,
-      response_format: { type: "json_object" },
-      messages: [
-        {
-          role: "system",
-          content:
-            "你是学术翻译助手。请只输出 JSON，字段为 title_zh 和 abstract_zh。要求忠实、简洁、术语准确。"
-        },
-        {
-          role: "user",
-          content: JSON.stringify({
-            title_en: paper.title_en || "",
-            abstract_original: paper.abstract_original || ""
-          })
-        }
-      ]
+  const prompts = config.ai?.prompts || {};
+  const values = {
+    paper_json: JSON.stringify({
+      title_en: paper.title_en || "",
+      abstract_original: paper.abstract_original || ""
     })
+  };
+  const translationSystem =
+    renderTemplate(
+      normalizeText(prompts.translation_system) ||
+        "你是学术翻译助手。请只输出 JSON，字段为 title_zh 和 abstract_zh。要求忠实、简洁、术语准确，不要添加额外解释。",
+      values
+    ) || "";
+  const translationUser = renderTemplate(normalizeText(prompts.translation_user_template) || values.paper_json, values);
+  const headers = {
+    "Content-Type": "application/json",
+    Authorization: `Bearer ${translationApiKey(config)}`
+  };
+  const requestPayload = (withResponseFormat: boolean): JsonRecord => ({
+    model,
+    temperature: 0,
+    max_tokens: 1200,
+    ...(withResponseFormat ? { response_format: { type: "json_object" } } : {}),
+    messages: [
+      {
+        role: "system",
+        content: translationSystem
+      },
+      {
+        role: "user",
+        content: translationUser
+      }
+    ]
   });
-  if (!response.ok) {
-    const body = normalizeText(await response.text());
-    throw new Error(`translation request failed: HTTP ${response.status}; body=${body}`);
+
+  const readTranslated = async (withResponseFormat: boolean): Promise<Pick<Paper, "title_zh" | "abstract_zh">> => {
+    const response = await postJsonWithTimeout(
+      `${baseUrl.replace(/\/$/, "")}/chat/completions`,
+      requestPayload(withResponseFormat),
+      headers,
+      config.runtime.command_timeout_ms
+    );
+    if (!response.ok) {
+      const body = normalizeText(await response.text());
+      throw new Error(`translation request failed: HTTP ${response.status}; body=${body}`);
+    }
+    const json = (await response.json()) as JsonRecord;
+    const choices = toArray(json.choices as JsonRecord[] | undefined);
+    const content = normalizeText(((choices[0] as JsonRecord | undefined)?.message as JsonRecord | undefined)?.content);
+    const translated = parseJsonLenient(content);
+    return {
+      title_zh: normalizeText(translated.title_zh),
+      abstract_zh: normalizeText(translated.abstract_zh)
+    };
+  };
+
+  let translated = await readTranslated(true);
+  if (!translated.title_zh || !translated.abstract_zh) {
+    translated = await readTranslated(false);
   }
-  const json = (await response.json()) as JsonRecord;
-  const choices = toArray(json.choices as JsonRecord[] | undefined);
-  const content = normalizeText(((choices[0] as JsonRecord | undefined)?.message as JsonRecord | undefined)?.content);
-  const translated = JSON.parse(content || "{}") as JsonRecord;
+  return translated;
+}
+
+async function classifyPaper(config: AppConfig, paper: Paper, taxonomy: Array<Record<string, unknown>>): Promise<Paper["classification"]> {
+  const prompts = config.ai?.prompts || {};
+  const values = {
+    taxonomy_json: JSON.stringify(taxonomy),
+    paper_json: JSON.stringify({
+      title_en: paper.title_en,
+      title_zh: paper.title_zh || "",
+      abstract_original: paper.abstract_original || "",
+      abstract_zh: paper.abstract_zh || "",
+      journal: paper.journal || {},
+      published_date: paper.published_date || "",
+      doi: paper.doi || "",
+      url: paper.url || ""
+    })
+  };
+  const systemPrompt =
+    renderTemplate(
+      normalizeText(prompts.classify_system) ||
+        "你是环境与能源论文分类助手。请只输出 JSON，字段为 classification(domain, subdomain, tags)。",
+      values
+    ) || "";
+  const userPrompt = renderTemplate(normalizeText(prompts.classify_user_template) || values.paper_json, values);
+  const parsed = await chatJson(config, {
+    model: config.ai?.model,
+    temperature: 0,
+    max_tokens: Math.min(config.ai?.max_tokens ?? 2000, 800),
+    response_format: { type: "json_object" },
+    messages: [
+      { role: "system", content: systemPrompt },
+      { role: "user", content: userPrompt }
+    ]
+  });
+  const cls = parsed.classification as JsonRecord | undefined;
   return {
-    title_zh: normalizeText(translated.title_zh),
-    abstract_zh: normalizeText(translated.abstract_zh)
+    domain: normalizeText(cls?.domain) || "未分类",
+    subdomain: normalizeText(cls?.subdomain) || "未分类",
+    tags: dedupeStrings(toArray(cls?.tags as string[] | undefined))
   };
 }
 
 async function enrichOne(config: AppConfig, paper: Paper, taxonomy: Array<Record<string, unknown>>): Promise<Paper> {
+  if (config.ai?.enrich?.enabled === false) {
+    return {
+      ...paper,
+      title_zh: normalizeText(paper.title_zh || paper.title_en || ""),
+      abstract_zh: normalizeText(paper.abstract_zh || paper.abstract_original || ""),
+      summary_zh: "",
+      novelty_points: [],
+      main_content: [],
+      publication_type: normalizePublicationType(paper.publication_type),
+      classification: paper.classification || heuristicClassification(`${paper.title_en} ${paper.abstract_original}`, taxonomy)
+    };
+  }
   let translated: Pick<Paper, "title_zh" | "abstract_zh"> = {
     title_zh: paper.title_zh || "",
     abstract_zh: paper.abstract_zh || ""
@@ -748,72 +1035,45 @@ async function enrichOne(config: AppConfig, paper: Paper, taxonomy: Array<Record
   let translationError = "";
   try {
     translated = await translatePaperFields(config, paper);
+    if ((paper.title_en || paper.abstract_original) && (!translated.title_zh || !translated.abstract_zh)) {
+      throw new Error("translation_empty_output");
+    }
   } catch (error) {
     translationError = String(error);
     if (config.ai?.translation?.required) {
       throw new Error(`translation_required_failed: ${translationError}`);
     }
   }
-  const prompts = config.ai?.prompts || {};
-  const values = {
-    taxonomy_json: JSON.stringify(taxonomy),
-    paper_json: JSON.stringify({
-      title_en: paper.title_en,
-      title_zh: translated.title_zh,
-      authors: paper.authors || [],
-      journal: paper.journal || {},
-      published_date: paper.published_date || "",
-      doi: paper.doi || "",
-      url: paper.url || "",
-      abstract_original: paper.abstract_original || "",
-      abstract_zh: translated.abstract_zh,
-      publication_type: paper.publication_type || "unknown",
-      classification_candidate: paper.classification || {}
-    })
-  };
-  const systemPrompt =
-    renderTemplate(
-      normalizeText(prompts.enrich_system) ||
-        "你是环境、能源领域的科研情报编辑。请严格输出 JSON，字段为 title_zh, abstract_zh, summary_zh, novelty_points, main_content, classification。",
-      values
-    ) || "";
-  const userPrompt = renderTemplate(normalizeText(prompts.enrich_user_template) || values.paper_json, values);
-  const parsed = await chatJson(config, {
-    model: config.ai?.model,
-    temperature: config.ai?.temperature ?? 0.2,
-    max_tokens: config.ai?.max_tokens ?? 2000,
-    response_format: { type: "json_object" },
-    messages: [
-      { role: "system", content: systemPrompt },
-      { role: "user", content: userPrompt }
-    ]
-  });
-  return {
+  const mergedPaper: Paper = {
     ...paper,
-    title_zh: normalizeText(parsed.title_zh) || translated.title_zh || paper.title_zh || "",
-    abstract_zh: normalizeText(parsed.abstract_zh) || translated.abstract_zh || "",
+    title_zh: translated.title_zh || paper.title_zh || "",
+    abstract_zh: translated.abstract_zh || paper.abstract_zh || ""
+  };
+  let classification = mergedPaper.classification || heuristicClassification(`${paper.title_en} ${paper.abstract_original}`, taxonomy);
+  try {
+    classification = await classifyPaper(config, mergedPaper, taxonomy);
+  } catch {
+    // 回退到规则分类，避免分类失败导致整篇中断
+  }
+  return {
+    ...mergedPaper,
     publication_type: normalizePublicationType(paper.publication_type),
     translation_error: translationError || undefined,
-    summary_zh: normalizeText(parsed.summary_zh),
-    novelty_points: dedupeStrings(toArray(parsed.novelty_points as string[] | undefined)).slice(0, 3),
-    main_content: dedupeStrings(toArray(parsed.main_content as string[] | undefined)).slice(0, 3),
-    classification: {
-      domain: normalizeText((parsed.classification as JsonRecord | undefined)?.domain) || paper.classification?.domain || "未分类",
-      subdomain:
-        normalizeText((parsed.classification as JsonRecord | undefined)?.subdomain) || paper.classification?.subdomain || "未分类",
-      tags: dedupeStrings(
-        toArray((parsed.classification as JsonRecord | undefined)?.tags as string[] | undefined).concat(
-          toArray(paper.classification?.tags)
-        )
-      )
-    }
+    summary_zh: "",
+    novelty_points: [],
+    main_content: [],
+    classification
   };
 }
 
 export async function enrichPapers(config: AppConfig, papers: Paper[]): Promise<Paper[]> {
   const taxonomy = await loadTaxonomy(config);
   const output: Paper[] = [];
-  for (const paper of papers) {
+  for (let index = 0; index < papers.length; index += 1) {
+    const paper = papers[index];
+    process.stdout.write(
+      `${JSON.stringify({ timestamp: new Date().toISOString(), level: "INFO", event: "workflow.enrich.paper", index: index + 1, total: papers.length, title: paper.title_en || "" })}\n`
+    );
     try {
       output.push(await enrichOne(config, paper, taxonomy));
     } catch (error) {

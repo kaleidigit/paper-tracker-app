@@ -8,6 +8,16 @@ export class EmptyPapersError extends Error {
   }
 }
 
+function logProgress(event: string, extra: Record<string, unknown> = {}): void {
+  const payload = {
+    timestamp: new Date().toISOString(),
+    level: "INFO",
+    event,
+    ...extra
+  };
+  process.stdout.write(`${JSON.stringify(payload)}\n`);
+}
+
 function nowInTimezone(timezone: string): Date {
   const text = new Date().toLocaleString("en-US", { timeZone: timezone });
   return new Date(text);
@@ -89,18 +99,24 @@ export async function runWorkflow(config: AppConfig): Promise<{ payload: Publish
   const backoff = Math.max(0, config.runtime.retry.backoff_ms);
   const title = buildDigestTitle(config);
 
+  logProgress("workflow.fetch.start");
   const papers = await withRetry(attempts, backoff, () => fetchPapers(config));
+  logProgress("workflow.fetch.done", { papers: papers.length });
   if (papers.length === 0) {
     throw new EmptyPapersError();
   }
+  logProgress("workflow.enrich.start", { papers: papers.length });
   const enriched = await withRetry(attempts, backoff, () => enrichPapers(config, papers));
+  logProgress("workflow.enrich.done", { papers: enriched.length });
   const payload: PublishPayload = {
     title,
     markdown: buildMarkdown(title, enriched),
     records: buildRecords(enriched),
     papers: enriched
   };
+  logProgress("workflow.publish.start", { papers: enriched.length });
   const publishResult = await withRetry(attempts, backoff, () => publishDigest(config, payload));
+  logProgress("workflow.publish.done");
   return { payload, publishResult };
 }
 

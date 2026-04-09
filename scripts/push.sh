@@ -28,6 +28,16 @@ is_lark_authenticated() {
   return 1
 }
 
+warn_lark_auth_if_needed() {
+  if is_lark_authenticated; then
+    return 0
+  fi
+  if [ "${PUSH_REQUIRE_LARK_AUTH:-0}" = "1" ]; then
+    die "lark-cli 未登录，请先执行 ./deploy.sh"
+  fi
+  log "WARN: 未检测到有效 user 登录态，将继续执行（当前默认按 bot 模式推送通常不受影响）。"
+}
+
 if [ ! -f ".env" ]; then
   if [ -f "config/.env.cn.example" ]; then
     cp config/.env.cn.example .env
@@ -48,7 +58,7 @@ command -v node >/dev/null 2>&1 || die "Node.js 未安装，请先执行 ./deplo
 command -v npm >/dev/null 2>&1 || die "npm 未安装，请先执行 ./deploy.sh"
 command -v lark-cli >/dev/null 2>&1 || die "lark-cli 未安装，请先执行 ./deploy.sh"
 
-is_lark_authenticated || die "lark-cli 未登录，请先执行 ./deploy.sh"
+warn_lark_auth_if_needed
 
 if [ -z "${SILICONFLOW_API_KEY:-}" ]; then
   die "缺少 SILICONFLOW_API_KEY，无法执行推送。"

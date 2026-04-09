@@ -75,6 +75,9 @@ export interface AppConfig {
       api_key_env?: string;
       required?: boolean;
     };
+    enrich?: {
+      enabled?: boolean;
+    };
     temperature?: number;
     max_tokens?: number;
     filter?: {
@@ -84,10 +87,13 @@ export interface AppConfig {
       temperature?: number;
       max_tokens?: number;
       min_confidence?: number;
+      max_checks_per_run?: number;
     };
     prompts?: {
-      enrich_system?: string;
-      enrich_user_template?: string;
+      classify_system?: string;
+      classify_user_template?: string;
+      translation_system?: string;
+      translation_user_template?: string;
       filter_system?: string;
       filter_user_template?: string;
     };
