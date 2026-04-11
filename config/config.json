@@ -23,7 +23,7 @@
     "state_dir": "data/ts-runner",
     "logs_dir": "data/ts-runner/logs",
     "temp_dir": "data/ts-runner/tmp",
-    "command_timeout_ms": 300000,
+    "command_timeout_ms": 600000,
     "retry": {
       "max_attempts": 2,
       "backoff_ms": 2000
@@ -42,7 +42,8 @@
       "required": true
     },
     "enrich": {
-      "enabled": true
+      "enabled": true,
+      "concurrency": 3
     },
     "temperature": 0.2,
     "max_tokens": 2000,

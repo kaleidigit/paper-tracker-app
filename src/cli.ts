@@ -39,8 +39,10 @@ async function runOnce(): Promise<void> {
   const metrics = await readMetrics(paths.metricsFile);
   const runKey = new Date().toISOString();
   const startedAt = Date.now();
+  const dryRun = process.env.PUSH_DRY_RUN === "1";
+  let success = false;
 
-  await logger.info("run.start", { runKey, mode: "run-once" });
+  await logger.info("run.start", { runKey, mode: "run-once", dry_run: dryRun });
 
   try {
     const result = await runWorkflow(config);
@@ -61,8 +63,10 @@ async function runOnce(): Promise<void> {
     await logger.info("run.success", {
       runKey,
       duration_ms: duration,
-      papers: result.payload.papers.length
+      papers: result.payload.papers.length,
+      dry_run: dryRun
     });
+    success = true;
   } catch (error) {
     const duration = Date.now() - startedAt;
     if (error instanceof EmptyPapersError) {
@@ -85,11 +89,11 @@ async function runOnce(): Promise<void> {
     metrics.updated_at = new Date().toISOString();
 
     await saveRunState(paths.stateFile, state, paths.metricsFile, metrics);
-    await logger.error("run.failed", { runKey, duration_ms: duration, error: String(error) });
+    await logger.error("run.failed", { runKey, duration_ms: duration, error: String(error), dry_run: dryRun });
     throw error;
   } finally {
     await cleanupTempDir(paths.tempDir);
-    await logger.info("run.cleanup_done", { temp_dir: paths.tempDir });
+    await logger.info("run.cleanup_done", { temp_dir: paths.tempDir, success });
   }
 }
 
@@ -118,7 +122,16 @@ async function runDaemon(): Promise<void> {
 }
 
 async function main(): Promise<void> {
-  const mode = process.argv[2] || "run-once";
+  // 解析 --dry-run flag（必须在任何 async 操作之前）
+  const args = process.argv.slice(2).filter((arg) => {
+    if (arg === "--dry-run") {
+      process.env.PUSH_DRY_RUN = "1";
+      return false;
+    }
+    return true;
+  });
+
+  const mode = args[0] || "run-once";
   const config = await loadAppConfig();
 
   if (mode === "schedule-print") {

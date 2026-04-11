@@ -1,0 +1,160 @@
+/**
+ * openalex-parser.ts
+ * OpenAlex API 采集器：为 Science / PNAS / Joule / EES 等期刊提供元数据
+ * 优势：完整作者列表、单位、摘要；免费公开 API
+ */
+
+import fs from "node:fs/promises";
+import type { AppConfig, JsonRecord, Paper } from "../types.js";
+import type { FilterBudget, JournalEntry, ParsedPaper } from "./types.js";
+import {
+  normalizeText, dedupeStrings, toArray, resolvePath,
+  fetchJson, parseDate, strictWindowStartAt, formatDateInTz,
+  matchesKeywords, shouldSkipLlmRescueByTitle, restoreAbstract,
+  heuristicClassification, normalizePublicationType
+} from "../utils.js";
+
+async function loadJournals(config: AppConfig): Promise<JournalEntry[]> {
+  const file = resolvePath(config.sources?.journals_file || "config/journals.json");
+  const raw = await fs.readFile(file, "utf-8");
+  const parsed = JSON.parse(raw);
+  return Array.isArray(parsed) ? parsed : [];
+}
+
+function buildPaper(input: ParsedPaper): Paper {
+  const titleEn = normalizeText(input.title);
+  const abs = normalizeText(input.abstractOriginal);
+  const cls = heuristicClassification(`${titleEn} ${abs} ${input.journal}`, input.taxonomy);
+  return {
+    id: normalizeText(input.doi) || normalizeText(input.url) || `${normalizeText(input.journal)}::${titleEn}`,
+    title_en: titleEn,
+    title_zh: "",
+    authors: dedupeStrings(input.authors),
+    author_affiliations: dedupeStrings(input.authorAffiliations),
+    journal: { name: normalizeText(input.journal), source_group: normalizeText(input.sourceGroup || input.journal) },
+    published_date: input.publishedDate,
+    doi: normalizeText(input.doi),
+    url: normalizeText(input.url),
+    image_url: normalizeText(input.imageUrl),
+    abstract_original: abs,
+    abstract_zh: "",
+    publication_type: normalizePublicationType(input.publicationType),
+    summary_zh: "",
+    novelty_points: [],
+    main_content: [],
+    classification: cls,
+    source: { provider: input.sourceProvider, raw_feed: input.rawFeed, raw_record_id: input.rawRecordId }
+  };
+}
+
+export class OpenAlexParser {
+  async collect(config: AppConfig, taxonomy: Array<Record<string, unknown>>, filterBudget: FilterBudget): Promise<Paper[]> {
+    const journals = await loadJournals(config);
+    const issns = dedupeStrings(
+      journals
+        .filter((j) => normalizeText(j.publisher_strategy) === "openalex")
+        .map((j) => normalizeText(j.issn))
+        .filter(Boolean)
+    );
+
+    if (issns.length === 0) return [];
+
+    const queries = toArray(config.sources?.openalex_queries).length
+      ? (config.sources?.openalex_queries as string[])
+      : ["energy", "climate"];
+
+    const windowStart = strictWindowStartAt(config);
+    const startDate = formatDateInTz(windowStart, "UTC");
+    const select = "id,title,doi,publication_date,type,authorships,primary_location,abstract_inverted_index";
+    const papers: Paper[] = [];
+    const timeoutMs = 30000;
+
+    const baseFilters = [`from_publication_date:${startDate}`, "type:article"];
+    if (issns.length > 0) {
+      baseFilters.push(`primary_location.source.issn:${issns.join("|")}`);
+    }
+
+    for (const query of queries) {
+      const url =
+        "https://api.openalex.org/works?per-page=25&sort=publication_date:desc" +
+        `&filter=${encodeURIComponent(baseFilters.join(","))}` +
+        `&search=${encodeURIComponent(query)}` +
+        `&select=${encodeURIComponent(select)}`;
+
+      process.stdout.write(
+        `${JSON.stringify({ timestamp: new Date().toISOString(), level: "INFO", event: "workflow.fetch.openalex.start", query })}\n`
+      );
+      let payload: JsonRecord = {};
+      try {
+        payload = await fetchJson(url, timeoutMs);
+      } catch {
+        process.stdout.write(
+          `${JSON.stringify({ timestamp: new Date().toISOString(), level: "WARN", event: "workflow.fetch.openalex.failed", query })}\n`
+        );
+        continue;
+      }
+
+      const results = toArray(payload.results as JsonRecord[] | undefined);
+      for (const item of results) {
+        const source = (item.primary_location as JsonRecord | undefined)?.source as JsonRecord | undefined;
+        const journal = normalizeText(source?.display_name);
+        const title = normalizeText(item.title);
+        const abstract = normalizeText(restoreAbstract(item.abstract_inverted_index as Record<string, number[]> | undefined));
+        const publishedDate = parseDate(item.publication_date);
+
+        // 独立检查：correction/retraction 等特殊内容不进入日报
+        if (shouldSkipLlmRescueByTitle(title)) continue;
+
+        if (!matchesKeywords(config, title, abstract, journal)) {
+          if (filterBudget.remaining <= 0) continue;
+          filterBudget.remaining -= 1;
+          const filterResult = await (async () => {
+            const { llmFilter } = await import("../modules.js");
+            return llmFilter(config, taxonomy, {
+              title_en: title,
+              journal: { name: journal },
+              published_date: publishedDate,
+              doi: normalizeText(item.doi),
+              url: normalizeText(item.doi || item.id),
+              abstract_original: abstract
+            });
+          })();
+          if (!Boolean(filterResult.keep)) continue;
+        }
+
+        const authorships = toArray(item.authorships as JsonRecord[] | undefined);
+        const authorAffiliations = dedupeStrings(
+          authorships.flatMap((a) =>
+            toArray((a.institutions as JsonRecord[] | undefined)?.map((inst) => normalizeText(inst.display_name))).filter(Boolean)
+          )
+        );
+
+        papers.push(
+          buildPaper({
+            title,
+            authors: authorships.map((a) => normalizeText(((a.author as JsonRecord | undefined)?.display_name) || "")),
+            authorAffiliations,
+            journal: journal || "Unknown Journal",
+            sourceGroup: normalizeText(source?.host_organization_name || journal),
+            publishedDate,
+            doi: normalizeText(item.doi),
+            url: normalizeText(item.doi || item.id),
+            abstractOriginal: abstract,
+            imageUrl: "",
+            publicationType: normalizeText(item.type),
+            sourceProvider: "openalex",
+            rawFeed: "https://api.openalex.org/works",
+            rawRecordId: normalizeText(item.id),
+            taxonomy
+          })
+        );
+      }
+
+      process.stdout.write(
+        `${JSON.stringify({ timestamp: new Date().toISOString(), level: "INFO", event: "workflow.fetch.openalex.done", query, papers: papers.length })}\n`
+      );
+    }
+
+    return papers;
+  }
+}

@@ -9,11 +9,12 @@
   },
   "scripts": {
     "deploy": "bash ./deploy.sh",
-    "push": "bash ./scripts/push.sh",
+    "push": "bash ./push.sh",
+    "push:dry-run": "bash ./push.sh --dry-run",
     "build": "tsc -p tsconfig.build.json",
     "runner:once": "tsx src/cli.ts run-once",
     "runner:llm-check": "tsx src/llm-check.ts",
-    "runner:full": "bash ./scripts/push.sh",
+    "runner:full": "bash ./push.sh",
     "runner:daemon": "tsx src/cli.ts daemon",
     "runner:schedule:print": "tsx src/cli.ts schedule-print",
     "runner:schedule:install": "tsx src/cli.ts schedule-install",
@@ -22,7 +23,8 @@
   },
   "dependencies": {
     "dotenv": "^16.6.1",
-    "fast-xml-parser": "^4.5.3"
+    "fast-xml-parser": "^4.5.3",
+    "p-limit": "^3.1.0"
   },
   "devDependencies": {
     "@types/node": "^24.7.2",

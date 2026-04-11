@@ -14,7 +14,7 @@ beforeAll(async () => {
   const classificationPath = path.join(tmpDir, "classification.json");
   await fs.writeFile(
     journalsPath,
-    JSON.stringify([{ name: "Nature", source_group: "Nature", rss_feeds: ["https://example.com/feed.xml"], issn: "0028-0836" }]),
+    JSON.stringify([{ name: "Nature", source_group: "Nature", rss_feeds: ["https://example.com/feed.xml"], issn: "0028-0836", publisher_strategy: "nature-rss" }]),
     "utf-8"
   );
   await fs.writeFile(
@@ -27,7 +27,14 @@ beforeAll(async () => {
     const url = String(input);
     if (url.includes("example.com/feed.xml")) {
       return new Response(
-        `<?xml version="1.0" encoding="UTF-8"?><rss xmlns:dc="http://purl.org/dc/elements/1.1/"><channel><item><title>Battery paper</title><description>battery systems</description><dc:type>review</dc:type><pubDate>${new Date().toUTCString()}</pubDate><link>https://paper.test/1</link></item></channel></rss>`,
+        `<?xml version="1.0" encoding="UTF-8"?><rss xmlns:dc="http://purl.org/dc/elements/1.1/"><channel><item><title>Battery paper</title><description>battery systems for clean energy</description><dc:type>research article</dc:type><pubDate>${new Date().toUTCString()}</pubDate><link>https://paper.test/1</link><guid>https://paper.test/1</guid></item></channel></rss>`,
+        { status: 200 }
+      );
+    }
+    if (url.includes("paper.test/1")) {
+      // Nature article page mock — JSON-LD data
+      return new Response(
+        `<html><head><script type="application/ld+json">{"@type":"ScholarlyArticle","author":[{"@type":"Person","name":"Li Wei"},{"@type":"Person","name":"Zhang San"}],"description":"Battery systems provide critical storage for renewable energy integration."}</script></head></html>`,
         { status: 200 }
       );
     }
@@ -37,7 +44,7 @@ beforeAll(async () => {
     if (url.includes("/chat/completions")) {
       return new Response(
         JSON.stringify({
-          choices: [{ message: { content: JSON.stringify({ title_zh: "中文标题", summary_zh: "摘要总结", abstract_zh: "中文摘要", novelty_points: ["n1", "n2", "n3"], main_content: ["m1", "m2", "m3"], classification: { domain: "能源", subdomain: "储能", tags: ["battery"] } }) } }]
+          choices: [{ message: { content: JSON.stringify({ title_zh: "中文标题", abstract_zh: "中文摘要", classification: { domain: "能源", subdomain: "储能", tags: ["battery"] } }) } }]
         }),
         { status: 200 }
       );
@@ -88,7 +95,7 @@ describe("workflow integration", () => {
     const result = await runWorkflow(config);
     expect(result.payload.papers).toHaveLength(1);
     expect(result.payload.papers[0].title_zh).toBe("中文标题");
-    expect(result.payload.papers[0].publication_type).toBe("review");
+    expect(result.payload.papers[0].publication_type).toBe("article");
     expect(typeof result.publishResult.saved_markdown).toBe("string");
   });
 

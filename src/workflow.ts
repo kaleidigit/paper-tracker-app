@@ -49,7 +49,7 @@ export function buildMarkdown(title: string, papers: Paper[]): string {
     lines.push(`- 摘要总结: ${paper.summary_zh || ""}`);
     lines.push(`- DOI: ${paper.doi || "N/A"}`);
     lines.push(`- 链接: ${paper.url || ""}`);
-    lines.push(`- 主图: ${paper.image_url || ""}`);
+    lines.push(`- 主图: ${paper.image_url ? `![](${paper.image_url})` : ""}`);
     lines.push("");
   });
   return lines.join("\n");

@@ -5,6 +5,10 @@ import type { AppConfig, RunState, MetricsState } from "./types.js";
 
 dotenv.config();
 
+function normalizeText(value: unknown): string {
+  return String(value ?? "").replace(/\s+/g, " ").trim();
+}
+
 const ROOT_DIR = process.cwd();
 const CONFIG_PATH = process.env.CONFIG_PATH || path.join(ROOT_DIR, "config", "config.json");
 

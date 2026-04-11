@@ -77,6 +77,7 @@ export interface AppConfig {
     };
     enrich?: {
       enabled?: boolean;
+      concurrency?: number;
     };
     temperature?: number;
     max_tokens?: number;

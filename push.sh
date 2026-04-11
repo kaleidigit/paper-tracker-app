@@ -1,8 +1,32 @@
 #!/usr/bin/env bash
+# push.sh — 日常推送脚本
+# 用法：
+#   ./push.sh            正式推送（抓取 + 增强 + 发布到飞书）
+#   ./push.sh --dry-run 仅生成 md/json 文件，不发布到飞书
+
 set -euo pipefail
 
-ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+SCRIPT_SOURCE="${BASH_SOURCE[0]:-$0}"
+SCRIPT_DIR="$(cd "$(dirname "$SCRIPT_SOURCE")" >/dev/null 2>&1 && pwd || true)"
+ROOT_DIR="$SCRIPT_DIR"
 cd "$ROOT_DIR"
+
+DRY_RUN=0
+for arg in "$@"; do
+  case "$arg" in
+    --dry-run|--dryrun)
+      DRY_RUN=1
+      ;;
+    -h|--help)
+      echo "Usage: ./push.sh [options]"
+      echo ""
+      echo "Options:"
+      echo "  --dry-run, --dryrun  仅生成 md/json 文件，跳过飞书发布"
+      echo "  -h, --help           显示帮助"
+      exit 0
+      ;;
+  esac
+done
 
 log() {
   echo "[push] $*"
@@ -56,14 +80,21 @@ set +a
 
 command -v node >/dev/null 2>&1 || die "Node.js 未安装，请先执行 ./deploy.sh"
 command -v npm >/dev/null 2>&1 || die "npm 未安装，请先执行 ./deploy.sh"
-command -v lark-cli >/dev/null 2>&1 || die "lark-cli 未安装，请先执行 ./deploy.sh"
 
-warn_lark_auth_if_needed
+if [ "$DRY_RUN" = "1" ]; then
+  log "DRY-RUN 模式：跳过 lark-cli 检查，仅生成 md/json 文件"
+  log "Running workflow (dry-run)..."
+  PUSH_DRY_RUN=1 npm run runner:once
+  log "Dry-run completed. 产物保存在 data/feishu-publisher/"
+else
+  command -v lark-cli >/dev/null 2>&1 || die "lark-cli 未安装，请先执行 ./deploy.sh"
+  warn_lark_auth_if_needed
 
-if [ -z "${SILICONFLOW_API_KEY:-}" ]; then
-  die "缺少 SILICONFLOW_API_KEY，无法执行推送。"
+  if [ -z "${SILICONFLOW_API_KEY:-}" ]; then
+    die "缺少 SILICONFLOW_API_KEY，无法执行推送。"
+  fi
+
+  log "Running workflow..."
+  npm run runner:once
+  log "Push completed."
 fi
-
-log "Running workflow once..."
-npm run runner:once
-log "Push completed."

@@ -58,11 +58,12 @@ cp config/.env.cn.example .env
 部署完成后，每次只需执行：
 
 ```bash
-./scripts/push.sh
+./push.sh
 ```
 
 说明：
-- 默认可直接执行 `push.sh`，不会强制要求每次重新扫码授权。
+- 默认可直接执行 `./push.sh`，不会强制要求每次重新扫码授权。
+- Dry-run（仅生成 md/json）：`./push.sh --dry-run` 或 `npm run push:dry-run`
 - 若你确实依赖 user 身份接口，可设置 `PUSH_REQUIRE_LARK_AUTH=1` 强制校验登录态。
 - 一般情况下（`--as bot` 推送）只要 `config/.env` 与飞书应用配置正确即可日常自动运行。
 
@@ -120,7 +121,10 @@ lark-cli auth status
 ./deploy.sh --auth-poll-interval 1 --auth-single-poll-timeout 8
 
 # 推送（抓取+增强+发布）
-./scripts/push.sh
+./push.sh --dry-run
+
+# 推送（抓取+增强+发布）
+./push.sh
 ```
 
 ### 二维码/链接输出示例
@@ -149,8 +153,7 @@ npm test
 - 可通过 `config/config.json -> ai.filter.max_checks_per_run` 限制单次运行的 LLM 复筛次数（默认 `8`），缩短总耗时。
 
 ### Nature 作者信息抓取
-- 对 `nature.com/articles/*` 链接，会在入库时额外抓取论文页，优先解析 `Author information` 区域与 `citation_author/citation_author_institution` 元标签。
-- 当页面未提供完整字段时，才回退 RSS 原始作者与机构信息。
+- 对 `nature.com/articles/*` 链接，会在入库时额外抓取论文页，优先解析 JSON-LD 结构化数据（含作者、单位、摘要），其次回退 `citation_author/citation_author_institution` 元标签。
 
 ### 运行结果检查
 - `data/ts-runner/state.json`：最近一次状态。
@@ -188,15 +191,20 @@ paper-tracker-app/
 │   └── 001_add_publication_type_and_bilingual.sql  # 数据库兼容升级脚本
 ├── package-lock.json              # npm 依赖锁定
 ├── package.json                   # Node 脚本入口与依赖声明
-├── scripts/
-│   └── push.sh                    # 日常推送脚本（仅执行推送）
+├── push.sh                      # 日常推送脚本（支持 --dry-run）
+├── scripts/                     # 已废弃，push.sh 已迁移至根目录
 ├── src/
 │   ├── cli.ts                     # CLI 主入口（run-once/daemon/schedule）
 │   ├── command.ts                 # 子命令执行与超时控制
 │   ├── config.ts                  # 配置加载与校验
 │   ├── llm-check.ts               # 翻译链路连通性检查
 │   ├── logger.ts                  # 结构化日志
-│   ├── modules.ts                 # 抓取/筛选/翻译/增强/发布模块实现
+│   ├── modules.ts                 # LLM 翻译/分类/筛选、发布入口
+│   ├── parsers/                  # 采集器模块（TypeScript）
+│   │   ├── types.ts              # 采集器类型定义
+│   │   ├── article-parser.ts     # 通用文章页面解析器（JSON-LD + HTML meta）
+│   │   ├── nature-parser.ts      # Nature 系列采集器（RSS + 页面）
+│   │   └── openalex-parser.ts    # OpenAlex API 采集器（Science/PNAS 等）
 │   ├── schedule-install.ts        # 系统计划任务安装逻辑
 │   ├── scheduler.ts               # 调度窗口与触发逻辑
 │   ├── storage.ts                 # 本地文件落盘与读取
@@ -214,10 +222,12 @@ paper-tracker-app/
 ## 目录结构规范
 - `config/`：项目业务配置与模板配置文件，所有人工常改业务参数统一放这里。
 - `docs/`：说明文档与模块级手册；根目录只保留总入口 `README.md` 与协作约束 `AGENTS.md`。
-- `scripts/`：仅保留可长期复用的运维脚本（当前为 `push.sh`）。
+- `scripts/`：已废弃，push.sh 迁移至根目录。
 - `src/`：运行时代码；`tests/`：测试代码；`migrations/`：数据库升级脚本。
 - 根目录仅保留工程入口文件（`package.json`、`deploy.sh`、TypeScript 工具链配置等）。
 
 ## 文档索引
 - 协作规范与优先级：[AGENTS.md](AGENTS.md)
+- 系统架构：[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)
+- 使用说明：[docs/USAGE.md](docs/USAGE.md)
 - 飞书命令模板专属参数：[docs/feishu-command-templates.md](docs/feishu-command-templates.md)
