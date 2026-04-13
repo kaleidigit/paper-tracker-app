@@ -350,6 +350,9 @@ export async function fetchPapers(config: AppConfig): Promise<Paper[]> {
 
   const allPapers = [...naturePapers, ...openalexPapers];
 
+  // 保存原始采集数据（用于调试和分析）
+  await saveRawCollectedPapers(config, allPapers);
+
   // ✅ 先去重后排（避免对重复论文排序）
   const seen = new Set<string>();
   const deduped = allPapers.filter((p) => {
@@ -361,6 +364,18 @@ export async function fetchPapers(config: AppConfig): Promise<Paper[]> {
   const ordered = deduped.sort((a, b) => `${b.published_date}`.localeCompare(`${a.published_date}`));
 
   return enrichPaperMetadata(config, ordered);
+}
+
+async function saveRawCollectedPapers(config: AppConfig, papers: Paper[]): Promise<void> {
+  const feishu = config.feishu || {};
+  const dataDir = resolvePath(feishu.data_dir || "data/feishu-publisher");
+  const timezone = config.app?.timezone || "Asia/Shanghai";
+  const dayDir = path.join(dataDir, new Date(new Date().toLocaleString("en-US", { timeZone: timezone })).toISOString().slice(0, 10));
+  await fs.mkdir(dayDir, { recursive: true });
+  const stamp = new Date().toISOString().replace(/[-:T]/g, "").slice(0, 15);
+  const rawFile = path.join(dayDir, `${stamp}-raw-collected.json`);
+  await fs.writeFile(rawFile, `${JSON.stringify(papers, null, 2)}\n`, "utf-8");
+  process.stdout.write(`${JSON.stringify({ timestamp: new Date().toISOString(), level: "INFO", event: "workflow.fetch.raw_saved", file: rawFile, count: papers.length })}\n`);
 }
 
 // ─── 飞书发布 ───────────────────────────────────────────────

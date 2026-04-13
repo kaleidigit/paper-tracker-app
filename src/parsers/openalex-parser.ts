@@ -49,6 +49,20 @@ function buildPaper(input: ParsedPaper): Paper {
 
 export class OpenAlexParser {
   async collect(config: AppConfig, taxonomy: Array<Record<string, unknown>>, filterBudget: FilterBudget): Promise<Paper[]> {
+    // ========== 阶段1：全量采集 ==========
+    process.stdout.write(`${JSON.stringify({ timestamp: new Date().toISOString(), level: "INFO", event: "workflow.fetch.phase1.start", phase: "full_collection", source: "openalex" })}\n`);
+    const rawPapers = await this.collectAllRawPapers(config, taxonomy);
+    process.stdout.write(`${JSON.stringify({ timestamp: new Date().toISOString(), level: "INFO", event: "workflow.fetch.phase1.done", collected: rawPapers.length, source: "openalex" })}\n`);
+
+    // ========== 阶段2：逐一筛选 ==========
+    process.stdout.write(`${JSON.stringify({ timestamp: new Date().toISOString(), level: "INFO", event: "workflow.fetch.phase2.start", phase: "llm_filtering", source: "openalex" })}\n`);
+    const filteredPapers = await this.filterPapersWithLLM(config, rawPapers, taxonomy, filterBudget);
+    process.stdout.write(`${JSON.stringify({ timestamp: new Date().toISOString(), level: "INFO", event: "workflow.fetch.phase2.done", filtered: filteredPapers.length, rejected: rawPapers.length - filteredPapers.length, source: "openalex" })}\n`);
+
+    return filteredPapers;
+  }
+
+  private async collectAllRawPapers(config: AppConfig, taxonomy: Array<Record<string, unknown>>): Promise<Paper[]> {
     const journals = await loadJournals(config);
     const issns = dedupeStrings(
       journals
@@ -105,23 +119,6 @@ export class OpenAlexParser {
         // 独立检查：correction/retraction 等特殊内容不进入日报
         if (shouldSkipLlmRescueByTitle(title)) continue;
 
-        if (!matchesKeywords(config, title, abstract, journal)) continue;
-        if (filterBudget.remaining > 0) {
-          filterBudget.remaining -= 1;
-          const filterResult = await (async () => {
-            const { llmFilter } = await import("../modules.js");
-            return llmFilter(config, taxonomy, {
-              title_en: title,
-              journal: { name: journal },
-              published_date: publishedDate,
-              doi: normalizeText(item.doi),
-              url: normalizeText(item.doi || item.id),
-              abstract_original: abstract
-            });
-          })();
-          if (!Boolean(filterResult.keep)) continue;
-        }
-
         const authorships = toArray(item.authorships as JsonRecord[] | undefined);
         const authorAffiliations = dedupeStrings(
           authorships.flatMap((a) =>
@@ -156,5 +153,33 @@ export class OpenAlexParser {
     }
 
     return papers;
+  }
+
+  private async filterPapersWithLLM(config: AppConfig, papers: Paper[], taxonomy: Array<Record<string, unknown>>, filterBudget: FilterBudget): Promise<Paper[]> {
+    const filtered: Paper[] = [];
+
+    for (const paper of papers) {
+      // 关键词匹配检查
+      if (!matchesKeywords(config, paper.title_en || "", paper.abstract_original || "", paper.journal?.name || "")) {
+        process.stdout.write(`${JSON.stringify({ timestamp: new Date().toISOString(), level: "INFO", event: "workflow.fetch.filter.keyword_reject", title: paper.title_en, source: "openalex" })}\n`);
+        continue;
+      }
+
+      // LLM筛选
+      if (filterBudget.remaining > 0) {
+        filterBudget.remaining -= 1;
+        const filterResult = await (async () => {
+          const { llmFilter } = await import("../modules.js");
+          return llmFilter(config, taxonomy, paper);
+        })();
+        if (!Boolean(filterResult.keep)) {
+          continue;
+        }
+      }
+
+      filtered.push(paper);
+    }
+
+    return filtered;
   }
 }

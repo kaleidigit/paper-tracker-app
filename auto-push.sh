@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
-# push.sh — 日常推送脚本
+# auto-push.sh — 自动推送脚本（用于定时任务）
 # 用法：
-#   ./push.sh            正式推送（抓取 + 增强 + 发布到飞书）
-#   ./push.sh --dry-run 仅生成 md/json 文件，不发布到飞书
+#   ./auto-push.sh            自动推送（周一推送3天，周二-周五推送1天）
+#   ./auto-push.sh --dry-run  仅生成 md/json 文件，不发布到飞书
 
 set -euo pipefail
 
@@ -18,22 +18,27 @@ for arg in "$@"; do
       DRY_RUN=1
       ;;
     -h|--help)
-      echo "Usage: ./push.sh [options]"
+      echo "Usage: ./auto-push.sh [options]"
       echo ""
       echo "Options:"
       echo "  --dry-run, --dryrun  仅生成 md/json 文件，跳过飞书发布"
       echo "  -h, --help           显示帮助"
+      echo ""
+      echo "说明："
+      echo "  - 周一：推送周五、周六、周日的论文（3天）"
+      echo "  - 周二-周五：推送昨天的论文（1天）"
+      echo "  - 周六、周日：不应运行自动推送"
       exit 0
       ;;
   esac
 done
 
 log() {
-  echo "[push] $*"
+  echo "[auto-push] $*"
 }
 
 die() {
-  echo "[push] ERROR: $*" >&2
+  echo "[auto-push] ERROR: $*" >&2
   exit 1
 }
 
@@ -81,9 +86,12 @@ set +a
 command -v node >/dev/null 2>&1 || die "Node.js 未安装，请先执行 ./deploy.sh"
 command -v npm >/dev/null 2>&1 || die "npm 未安装，请先执行 ./deploy.sh"
 
+# 设置自动推送模式环境变量
+export PUSH_MODE=auto
+
 if [ "$DRY_RUN" = "1" ]; then
   log "DRY-RUN 模式：跳过 lark-cli 检查，仅生成 md/json 文件"
-  log "Running workflow (dry-run)..."
+  log "Running workflow (auto mode, dry-run)..."
   PUSH_DRY_RUN=1 npm run runner:once
   log "Dry-run completed. 产物保存在 data/feishu-publisher/"
 else
@@ -94,7 +102,7 @@ else
     die "缺少 SILICONFLOW_API_KEY，无法执行推送。"
   fi
 
-  log "Running workflow..."
+  log "Running workflow (auto mode)..."
   npm run runner:once
-  log "Push completed."
+  log "Auto-push completed."
 fi

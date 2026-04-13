@@ -103,11 +103,43 @@ export function formatDateInTz(date: Date, timezone: string): string {
 
 export function strictWindowStartAt(config: { pipeline?: { paper_window?: { timezone?: string } }; app?: { timezone?: string } }): Date {
   const timezone = config.pipeline?.paper_window?.timezone || config.app?.timezone || "Asia/Shanghai";
+  const mode = (process.env.PUSH_MODE === 'auto') ? 'auto' : 'manual';
+
+  // 支持从环境变量读取自定义天数（manual-push.sh 使用）
+  const customDays = process.env.PUSH_DAYS ? parseInt(process.env.PUSH_DAYS, 10) : null;
+
+  // 获取当前时区的时间
   const nowInTz = new Date(new Date().toLocaleString("en-US", { timeZone: timezone }));
-  const yesterday = new Date(nowInTz);
-  yesterday.setDate(nowInTz.getDate() - 1);
-  yesterday.setHours(8, 0, 0, 0);
-  return yesterday;
+  const dayOfWeek = nowInTz.getDay(); // 0=Sunday, 1=Monday, ..., 6=Saturday
+
+  let daysToGoBack = 1;
+
+  if (customDays !== null && customDays > 0) {
+    // 手动指定天数（优先级最高）
+    daysToGoBack = customDays;
+  } else if (mode === 'auto') {
+    // 自动推送模式：周一推送3天，周二-周五推送1天
+    if (dayOfWeek === 1) {
+      // 周一：推送周五、周六、周日（3天）
+      daysToGoBack = 3;
+    } else if (dayOfWeek >= 2 && dayOfWeek <= 5) {
+      // 周二-周五：推送昨天（1天）
+      daysToGoBack = 1;
+    } else {
+      // 周六、周日：理论上不应该自动推送，但如果运行了，推送昨天
+      daysToGoBack = 1;
+    }
+  } else {
+    // 手动推送模式：默认推送昨天（但应该通过 PUSH_DAYS 指定）
+    daysToGoBack = 1;
+  }
+
+  // 计算开始时间：往前推 daysToGoBack 天，设置为 08:00:00
+  const startAt = new Date(nowInTz);
+  startAt.setDate(nowInTz.getDate() - daysToGoBack);
+  startAt.setHours(8, 0, 0, 0);
+
+  return startAt;
 }
 
 export function restoreAbstract(index: Record<string, number[]> | undefined): string {

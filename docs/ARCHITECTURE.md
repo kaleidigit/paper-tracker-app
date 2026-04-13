@@ -9,11 +9,27 @@
                              │
                              ▼
 ┌─────────────────────────────────────────────────────────────┐
-│  fetchPapers()                                              │
-│  ├── NatureParser.collect()     Nature 系列 RSS + 页面 JSON-LD │
-│  │   └── ArticlePageParser      通用 HTML 页面解析器          │
-│  └── OpenAlexParser.collect()   Science / PNAS / Joule / EES  │
-│       └── fetchJson (3 retries)  重试 3 次，指数退避           │
+│  fetchPapers() - 两阶段采集流程                              │
+│                                                             │
+│  阶段1 - 全量采集（并行）                                    │
+│  ├── NatureParser.collectAllRawPapers()                    │
+│  │   ├── RSS 解析 + 时间窗口过滤                            │
+│  │   ├── ArticlePageParser 抓取完整信息                     │
+│  │   └── 构建 Paper 对象（不做筛选）                        │
+│  └── OpenAlexParser.collectAllRawPapers()                  │
+│      ├── OpenAlex API 查询                                 │
+│      └── 构建 Paper 对象（不做筛选）                        │
+│                                                             │
+│  保存原始数据: {timestamp}-raw-collected.json               │
+│                                                             │
+│  阶段2 - 逐一筛选（串行）                                    │
+│  ├── NatureParser.filterPapersWithLLM()                    │
+│  │   ├── 关键词匹配检查                                     │
+│  │   └── LLM 二次筛选（filterBudget）                       │
+│  └── OpenAlexParser.filterPapersWithLLM()                  │
+│      ├── 关键词匹配检查                                     │
+│      └── LLM 二次筛选（filterBudget）                       │
+│                                                             │
 │  ├── 去重（DOI > URL > 期刊+标题）                          │
 │  └── 去重后按发布日期倒序                                    │
 └────────────────────────────┬────────────────────────────────┘
@@ -71,13 +87,21 @@
 
 **策略**：`publisher_strategy: "nature-rss"`
 
-**流程**：
+**流程（两阶段模式）**：
+
+**阶段1 - 全量采集**：
 1. 读取 `journals.json`，筛选所有 `publisher_strategy === "nature-rss"` 的期刊 RSS feed
 2. 解析 XML，获取标题、摘要、发布日期
 3. 时间窗口过滤（默认：昨天 08:00 之后）
-4. 关键词匹配或 LLM 二次筛选
+4. **跳过 correction/retraction 等特殊类型**（`shouldSkipLlmRescueByTitle`）
 5. **抓取文章页面** → `ArticlePageParser` 解析 JSON-LD / HTML meta，提取作者、单位、摘要、发表类型、主图
 6. 调用 `buildPaper()` 构建统一 Paper 对象
+7. **保存所有采集到的原始论文**（不做筛选）
+
+**阶段2 - 逐一筛选**：
+1. 对每篇论文进行关键词匹配检查
+2. 通过关键词的论文提交给 LLM 进行二次筛选
+3. 只保留 LLM 判断为 `keep=true` 的论文
 
 **元数据解析优先级**：
 ```
@@ -88,13 +112,22 @@ JSON-LD (ScholarlyArticle)  >  HTML meta 标签  >  RSS 原始字段
 
 **策略**：`publisher_strategy: "openalex"`
 
-**流程**：
+**流程（两阶段模式）**：
+
+**阶段1 - 全量采集**：
 1. 读取 `journals.json`，筛选所有 `publisher_strategy === "openalex"` 的期刊，按 ISSN 分组
 2. 构建 OpenAlex API 请求：`filter=from_publication_date:YYYY-MM-DD,type:article,primary_location.source.issn:ISSN1|ISSN2|...`
 3. 按 `openalex_queries` 关键词列表逐一查询（默认：energy, climate 等）
 4. **最多 25 篇/页**，带重试（3 次，指数退避 500ms）
 5. 解析 `authorships[]` 提取作者 + 单位，`abstract_inverted_index` 还原摘要
-6. 调用 `buildPaper()` 构建统一 Paper 对象
+6. **跳过 correction/retraction 等特殊类型**
+7. 调用 `buildPaper()` 构建统一 Paper 对象
+8. **保存所有采集到的原始论文**（不做筛选）
+
+**阶段2 - 逐一筛选**：
+1. 对每篇论文进行关键词匹配检查
+2. 通过关键词的论文提交给 LLM 进行二次筛选
+3. 只保留 LLM 判断为 `keep=true` 的论文
 
 **OpenAlex 优势**：
 - 完整作者列表（含多位合作者）
@@ -167,10 +200,27 @@ JSON-LD (ScholarlyArticle)  >  HTML meta 标签  >  RSS 原始字段
 
 ## 5. LLM 过滤机制（filterBudget）
 
+**两阶段采集流程**：
+
+```
+阶段1 - 全量采集（collectAllRawPapers）
+  ├── 时间窗口过滤
+  ├── 跳过 correction/retraction
+  ├── 爬取完整论文信息（authors, affiliations, abstract, image等）
+  └── 保存所有原始论文到 {timestamp}-raw-collected.json
+
+阶段2 - 逐一筛选（filterPapersWithLLM）
+  ├── 关键词匹配检查
+  ├── LLM 二次筛选（消耗 filterBudget）
+  └── 只保留 keep=true 的论文
+```
+
+**filterBudget 预算池**：
+
 三个采集器**共享同一个预算池**：
 
 ```
-filterBudget = { remaining: 20 }
+filterBudget = { remaining: 40 }  // 默认值，可在 config.json 中配置
 
 NatureParser        消耗 1 次
 OpenAlexParser       消耗 1 次
@@ -180,13 +230,18 @@ remaining = 0 时    跳过所有 LLM 过滤
 
 **适用场景**：论文标题/摘要不含关键词，但 LLM 判断属于能源/气候领域。
 
+**原始数据保存**：
+- 阶段1采集的所有论文会保存到 `data/feishu-publisher/YYYY-MM-DD/{timestamp}-raw-collected.json`
+- 包含所有时间窗口内的论文，无论是否通过筛选
+- 方便后续分析和调试 LLM 筛选逻辑
+
 **自动跳过类型**：以下标题模式的论文在采集阶段直接排除，不消耗 LLM 预算，也不进入日报：
 - Author Correction / Publisher Correction / Correction
 - Retraction
 - Briefing Chat / Research Briefing / News & Views
 - Career Column / Podcast
 
-判断函数为 `shouldSkipLlmRescueByTitle()`（`src/utils.ts`），在 `matchesKeywords` 检查**之前**独立执行，且在 `enrichPapers` 中有第二层防御。
+判断函数为 `shouldSkipLlmRescueByTitle()`（`src/utils.ts`），在阶段1采集时执行，且在 `enrichPapers` 中有第二层防御。
 
 ## 6. 文件组织
 

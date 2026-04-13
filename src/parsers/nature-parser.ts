@@ -79,6 +79,20 @@ export class NatureParser {
 
     if (feeds.length === 0) return [];
 
+    // ========== 阶段1：全量采集 ==========
+    process.stdout.write(`${JSON.stringify({ timestamp: new Date().toISOString(), level: "INFO", event: "workflow.fetch.phase1.start", phase: "full_collection" })}\n`);
+    const rawPapers = await this.collectAllRawPapers(config, feeds, taxonomy);
+    process.stdout.write(`${JSON.stringify({ timestamp: new Date().toISOString(), level: "INFO", event: "workflow.fetch.phase1.done", collected: rawPapers.length })}\n`);
+
+    // ========== 阶段2：逐一筛选 ==========
+    process.stdout.write(`${JSON.stringify({ timestamp: new Date().toISOString(), level: "INFO", event: "workflow.fetch.phase2.start", phase: "llm_filtering" })}\n`);
+    const filteredPapers = await this.filterPapersWithLLM(config, rawPapers, taxonomy, filterBudget);
+    process.stdout.write(`${JSON.stringify({ timestamp: new Date().toISOString(), level: "INFO", event: "workflow.fetch.phase2.done", filtered: filteredPapers.length, rejected: rawPapers.length - filteredPapers.length })}\n`);
+
+    return filteredPapers;
+  }
+
+  private async collectAllRawPapers(config: AppConfig, feeds: string[], taxonomy: Array<Record<string, unknown>>): Promise<Paper[]> {
     const parser = new XMLParser({ ignoreAttributes: false, attributeNamePrefix: "" });
     const start = strictWindowStartAt(config);
     const papers: Paper[] = [];
@@ -117,20 +131,7 @@ export class NatureParser {
         // 独立检查：correction/retraction 等特殊内容不进入日报
         if (shouldSkipLlmRescueByTitle(title)) continue;
 
-        if (!matchesKeywords(config, title, rssAbstract, journal)) continue;
-        if (filterBudget.remaining > 0) {
-          filterBudget.remaining -= 1;
-          const filterResult = await llmFilterFromModules(config, taxonomy, {
-            title_en: title,
-            journal: { name: journal },
-            published_date: publishedDate,
-            doi: normalizeText(item["dc:identifier"]),
-            url: paperUrl,
-            abstract_original: rssAbstract
-          });
-          if (!Boolean(filterResult.keep)) continue;
-        }
-
+        // 爬取页面详细信息
         if (!authorInfoCache.has(paperUrl.toLowerCase())) {
           authorInfoCache.set(paperUrl.toLowerCase(), articleParser.parse(paperUrl));
         }
@@ -167,5 +168,30 @@ export class NatureParser {
     }
 
     return papers;
+  }
+
+  private async filterPapersWithLLM(config: AppConfig, papers: Paper[], taxonomy: Array<Record<string, unknown>>, filterBudget: FilterBudget): Promise<Paper[]> {
+    const filtered: Paper[] = [];
+
+    for (const paper of papers) {
+      // 关键词匹配检查
+      if (!matchesKeywords(config, paper.title_en || "", paper.abstract_original || "", paper.journal?.name || "")) {
+        process.stdout.write(`${JSON.stringify({ timestamp: new Date().toISOString(), level: "INFO", event: "workflow.fetch.filter.keyword_reject", title: paper.title_en })}\n`);
+        continue;
+      }
+
+      // LLM筛选
+      if (filterBudget.remaining > 0) {
+        filterBudget.remaining -= 1;
+        const filterResult = await llmFilterFromModules(config, taxonomy, paper);
+        if (!Boolean(filterResult.keep)) {
+          continue;
+        }
+      }
+
+      filtered.push(paper);
+    }
+
+    return filtered;
   }
 }
