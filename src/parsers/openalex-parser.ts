@@ -105,8 +105,8 @@ export class OpenAlexParser {
         // 独立检查：correction/retraction 等特殊内容不进入日报
         if (shouldSkipLlmRescueByTitle(title)) continue;
 
-        if (!matchesKeywords(config, title, abstract, journal)) {
-          if (filterBudget.remaining <= 0) continue;
+        if (!matchesKeywords(config, title, abstract, journal)) continue;
+        if (filterBudget.remaining > 0) {
           filterBudget.remaining -= 1;
           const filterResult = await (async () => {
             const { llmFilter } = await import("../modules.js");

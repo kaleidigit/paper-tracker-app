@@ -119,7 +119,13 @@ export async function llmFilter(config: AppConfig, taxonomy: Array<Record<string
   const values = {
     taxonomy_json: JSON.stringify(taxonomy),
     paper_json: JSON.stringify(candidate),
-    keywords_json: JSON.stringify(config.sources?.keywords || [])
+    keywords_json: JSON.stringify(config.sources?.keywords || []),
+    title_en: candidate.title_en || "",
+    journal_name: candidate.journal?.name || "",
+    published_date: candidate.published_date || "",
+    doi: candidate.doi || "",
+    url: candidate.url || "",
+    abstract_original: candidate.abstract_original || ""
   };
   const systemPrompt = renderTemplate(
     normalizeText(prompts.filter_system) || "你是环境、能源与气候方向的论文筛选器。请只输出 JSON：keep, confidence, reason, suggested_domain, suggested_tags。",
@@ -151,7 +157,9 @@ async function translatePaperFields(config: AppConfig, paper: Paper): Promise<Pi
   }
   const prompts = config.ai?.prompts || {};
   const values = {
-    paper_json: JSON.stringify({ title_en: paper.title_en || "", abstract_original: paper.abstract_original || "" })
+    paper_json: JSON.stringify({ title_en: paper.title_en || "", abstract_original: paper.abstract_original || "" }),
+    title_en: paper.title_en || "",
+    abstract_original: paper.abstract_original || ""
   };
   const translationSystem = renderTemplate(
     normalizeText(prompts.translation_system) || "你是学术翻译助手。请只输出 JSON，字段为 title_zh 和 abstract_zh。要求忠实、简洁、术语准确，不要添加额外解释。",
@@ -200,7 +208,15 @@ async function classifyPaper(config: AppConfig, paper: Paper, taxonomy: Array<Re
       published_date: paper.published_date || "",
       doi: paper.doi || "",
       url: paper.url || ""
-    })
+    }),
+    title_en: paper.title_en || "",
+    title_zh: paper.title_zh || "",
+    abstract_original: paper.abstract_original || "",
+    abstract_zh: paper.abstract_zh || "",
+    journal_name: paper.journal?.name || "",
+    published_date: paper.published_date || "",
+    doi: paper.doi || "",
+    url: paper.url || ""
   };
   const systemPrompt = renderTemplate(
     normalizeText(prompts.classify_system) || "你是环境与能源论文分类助手。请只输出 JSON，字段为 classification(domain, subdomain, tags)。",
@@ -258,12 +274,14 @@ async function enrichOne(config: AppConfig, paper: Paper, taxonomy: Array<Record
   let translationError = "";
   try {
     translated = await translatePaperFields(config, paper);
-    if ((paper.title_en || paper.abstract_original) && (!translated.title_zh || !translated.abstract_zh)) {
-      throw new Error("translation_empty_output");
+    const missingTitle = Boolean(paper.title_en) && !translated.title_zh;
+    const missingAbstract = Boolean(paper.abstract_original) && !translated.abstract_zh;
+    if (missingTitle || missingAbstract) {
+      throw new Error(`translation_partial_output:title=${missingTitle ? "missing" : "ok"},abstract=${missingAbstract ? "missing" : "ok"}`);
     }
   } catch (error) {
     translationError = String(error);
-    if (config.ai?.translation?.required) {
+    if (config.ai?.translation?.required && !translated.title_zh && Boolean(paper.title_en)) {
       throw new Error(`translation_required_failed: ${translationError}`);
     }
   }
@@ -376,26 +394,71 @@ function buildDigestTitle(config: AppConfig): string {
 }
 
 export function buildMarkdown(title: string, papers: Paper[]): string {
-  const lines: string[] = [`# ${title}`, "", `共收录 ${papers.length} 篇。`, ""];
+  const normalizeBlock = (value?: string): string => (value || "").trim().replace(/\n{3,}/g, "\n\n");
+  const lines: string[] = [`# ${title}`, "", `共收录 **${papers.length}** 篇。`, ""];
+
   papers.forEach((paper, index) => {
     const cls = paper.classification || {};
-    lines.push(`## ${index + 1}. ${paper.title_zh || paper.title_en}`);
-    lines.push(`- 英文标题: ${paper.title_en || ""}`);
-    lines.push(`- 作者: ${(paper.authors || []).join(", ")}`);
-    lines.push(`- 作者单位: ${(paper.author_affiliations || []).join("; ")}`);
-    lines.push(`- 期刊: ${paper.journal?.name || ""}`);
-    lines.push(`- 日期: ${paper.published_date || ""}`);
-    lines.push(`- 类型: ${paper.publication_type || "unknown"}`);
-    lines.push(`- 一级领域: ${cls.domain || ""}`);
-    lines.push(`- 二级领域: ${cls.subdomain || ""}`);
-    lines.push(`- 标签: ${(cls.tags || []).join(", ")}`);
-    lines.push(`- 中文摘要: ${paper.abstract_zh || ""}`);
-    lines.push(`- 摘要总结: ${paper.summary_zh || ""}`);
-    lines.push(`- DOI: ${paper.doi || "N/A"}`);
-    lines.push(`- 链接: ${paper.url || ""}`);
-    lines.push(`- 主图: ${paper.image_url ? `![](${paper.image_url})` : ""}`);
+    const paperTitle = paper.title_zh || paper.title_en || `论文 ${index + 1}`;
+    const englishTitle = (paper.title_en || "").trim();
+    const metaLines: string[] = [];
+    const resourceLines: string[] = [];
+    const pushMeta = (target: string[], label: string, value?: string): void => {
+      const text = (value || "").trim();
+      if (text) {
+        target.push(`- **${label}**：${text}`);
+      }
+    };
+    const pushSection = (label: string, value?: string, quote = false): void => {
+      const text = normalizeBlock(value);
+      if (text) {
+        lines.push(`**${label}**  `);
+        lines.push(quote ? text.split("\n").map((line) => `> ${line}`).join("\n") : text);
+        lines.push("");
+      }
+    };
+
+    if (index > 0) {
+      lines.push("---", "");
+    }
+
+    lines.push(`## ${index + 1}. ${paperTitle}`);
     lines.push("");
+
+    if (englishTitle && englishTitle !== paperTitle) {
+      lines.push(`*${englishTitle}*`);
+      lines.push("");
+    }
+
+    pushMeta(metaLines, "作者", (paper.authors || []).join(", "));
+    pushMeta(metaLines, "作者单位", (paper.author_affiliations || []).join("；"));
+    pushMeta(metaLines, "期刊", paper.journal?.name || "");
+    pushMeta(metaLines, "日期", paper.published_date || "");
+    pushMeta(metaLines, "类型", paper.publication_type || "unknown");
+    pushMeta(metaLines, "一级领域", cls.domain || "");
+    pushMeta(metaLines, "二级领域", cls.subdomain || "");
+    pushMeta(metaLines, "标签", (cls.tags || []).join("，"));
+    if (metaLines.length > 0) {
+      lines.push(...metaLines, "");
+    }
+
+    pushSection("中文摘要", paper.abstract_zh || "");
+    pushSection("摘要总结", paper.summary_zh || "", true);
+
+    pushMeta(resourceLines, "DOI", paper.doi || "");
+    pushMeta(resourceLines, "链接", paper.url || "");
+    if (resourceLines.length > 0) {
+      lines.push("**资源信息**  ");
+      lines.push(...resourceLines, "");
+    }
+
+    if (paper.image_url) {
+      lines.push("**主图**  ");
+      lines.push(`![](${paper.image_url})`);
+      lines.push("");
+    }
   });
+
   return lines.join("\n");
 }
 

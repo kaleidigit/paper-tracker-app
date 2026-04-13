@@ -117,8 +117,8 @@ export class NatureParser {
         // 独立检查：correction/retraction 等特殊内容不进入日报
         if (shouldSkipLlmRescueByTitle(title)) continue;
 
-        if (!matchesKeywords(config, title, rssAbstract, journal)) {
-          if (filterBudget.remaining <= 0) continue;
+        if (!matchesKeywords(config, title, rssAbstract, journal)) continue;
+        if (filterBudget.remaining > 0) {
           filterBudget.remaining -= 1;
           const filterResult = await llmFilterFromModules(config, taxonomy, {
             title_en: title,

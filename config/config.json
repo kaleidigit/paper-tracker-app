@@ -54,15 +54,15 @@
       "temperature": 0.0,
       "max_tokens": 500,
       "min_confidence": 0.5,
-      "max_checks_per_run": 8
+      "max_checks_per_run": 40
     },
     "prompts": {
-      "classify_system": "你是环境与能源论文分类助手。请严格输出 JSON，字段必须为 classification，且 classification 必须包含 domain, subdomain, tags(array)。只能从给定分类树中选择 domain/subdomain。若不确定可选择最接近项。分类树如下：{{taxonomy_json}}",
-      "classify_user_template": "{{paper_json}}",
-      "translation_system": "你是学术翻译助手。请只输出 JSON，字段为 title_zh 和 abstract_zh。要求忠实、简洁、术语准确，不要添加额外解释。",
-      "translation_user_template": "{{paper_json}}",
-      "filter_system": "你是环境、能源与气候方向的论文筛选器。请根据论文信息判断是否应纳入日报。只输出 JSON，字段必须为 keep(boolean), confidence(0~1), reason(string), suggested_domain(string), suggested_tags(array)。若与环境/能源/气候/可持续发展明显相关，则 keep=true，否则 false。",
-      "filter_user_template": "关键词参考：{{keywords_json}}\n分类树参考：{{taxonomy_json}}\n待判断论文：{{paper_json}}"
+      "classify_system": "你是环境、能源与气候论文分类助手。你的任务是根据论文的主要研究问题进行分类，而不是被材料、器件或方法学术语误导。必须严格输出 JSON，格式为 {\"classification\": {\"domain\": string, \"subdomain\": string, \"tags\": string[]}}。domain 和 subdomain 只能从给定分类树中选择，不允许自造类别。优先依据论文的核心贡献分类：若论文聚焦净零转型、减排路径、能源系统建模、电力系统灵活性、政策评估、气候治理，应优先归入系统转型/政策评估相关类别；若只是讨论某种材料、催化剂、电极、电解液、薄膜、纳米结构、晶体结构或微观机理，除非其核心贡献明确落在环境治理或能源系统层面，否则不要误分到宏观系统类。若信息不足，选择最接近的现有类别，并保持 tags 简洁、具体、可检索。分类树如下：{{taxonomy_json}}",
+      "classify_user_template": "请基于以下论文信息完成分类。注意按主要研究问题分类，而不是按表面术语分类。\n\n英文标题：{{title_en}}\n中文标题：{{title_zh}}\n英文摘要：{{abstract_original}}\n中文摘要：{{abstract_zh}}\n期刊：{{journal_name}}\n日期：{{published_date}}\nDOI：{{doi}}\n链接：{{url}}",
+      "translation_system": "你是学术论文翻译助手。必须严格输出合法 JSON，且只能包含两个字段：title_zh, abstract_zh。要求：1) 忠实翻译，不添加解释，不改写成总结；2) title_zh 必须翻译标题，不能留空，不能原样照抄英文，除非是公认缩写、化学式、专有名词或模型名；3) 如果提供了 abstract_original，则 abstract_zh 必须对其完整翻译，术语准确、语句通顺；4) 如果 abstract_original 为空，则 abstract_zh 返回空字符串；5) 不要输出 Markdown、注释或额外字段。",
+      "translation_user_template": "请翻译以下论文信息，并严格返回 JSON。\n\n英文标题：{{title_en}}\n英文摘要：{{abstract_original}}",
+      "filter_system": "你是环境、能源与气候方向的论文筛选器，目标是为“每日顶刊环境与能源论文日报”挑选值得保留的论文。必须严格输出 JSON，且只能包含字段：keep(boolean), confidence(number 0-1), reason(string), suggested_domain(string), suggested_tags(string[])。筛选原则：1) 应保留：净零转型、能源系统建模、电力系统灵活性、减排路径、气候政策、环境治理、污染控制、生态系统、碳循环、资源可持续、环境健康、能源-气候-经济耦合等直接相关研究；2) 对边界案例，如果论文核心在 system, transition, pathway, net-zero, decarbonization, grid, flexibility, mitigation, policy, emissions, climate risk 等系统层问题，倾向 keep=true；3) 应排除：纯材料设计、催化机理、纳米材料、单一电极/电解液/膜/晶体结构优化、仅关注微观性能提升而没有明确环境/能源系统意义的论文；4) 不要因为出现 battery, solar, hydrogen, catalyst, water 等单个术语就自动保留；应看论文核心贡献是否真正服务于环境、能源、气候或可持续发展问题。reason 简洁说明判断依据，suggested_domain/tags 仅作建议。",
+      "filter_user_template": "请判断下列论文是否应纳入日报。不要被单个关键词误导，要根据论文的核心研究问题做判断。\n\n英文标题：{{title_en}}\n英文摘要：{{abstract_original}}\n期刊：{{journal_name}}\n日期：{{published_date}}\nDOI：{{doi}}\n链接：{{url}}\n关键词参考：{{keywords_json}}\n分类树参考：{{taxonomy_json}}\n完整论文对象：{{paper_json}}"
     }
   },
   "sources": {
@@ -73,17 +73,16 @@
       "carbon",
       "decarbonization",
       "energy",
-      "battery",
-      "electrolyte",
-      "photovoltaic",
-      "solar",
-      "wind",
-      "hydrogen",
-      "catalysis",
+      "net-zero",
+      "transition",
+      "pathway",
+      "flexibility",
+      "grid",
+      "power system",
+      "energy system",
       "sustainability",
       "emission",
       "air pollution",
-      "water",
       "soil",
       "ecosystem",
       "renewable"
@@ -93,15 +92,10 @@
       "energy",
       "climate",
       "carbon",
-      "battery",
-      "hydrogen",
-      "solar",
-      "wind",
-      "water",
       "pollution",
-      "catalysis",
       "sustainability",
-      "emission"
+      "emission",
+      "renewable"
     ]
   },
   "classification": {

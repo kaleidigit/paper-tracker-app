@@ -31,27 +31,71 @@ export function buildDigestTitle(config: AppConfig): string {
 }
 
 export function buildMarkdown(title: string, papers: Paper[]): string {
-  const lines: string[] = [`# ${title}`, "", `共收录 ${papers.length} 篇。`, ""];
+  const normalizeBlock = (value?: string): string => (value || "").trim().replace(/\n{3,}/g, "\n\n");
+  const lines: string[] = [`# ${title}`, "", `共收录 **${papers.length}** 篇。`, ""];
+
   papers.forEach((paper, index) => {
     const cls = paper.classification || {};
-    const journal = paper.journal?.name || "";
-    lines.push(`## ${index + 1}. ${paper.title_zh || paper.title_en}`);
-    lines.push(`- 英文标题: ${paper.title_en || ""}`);
-    lines.push(`- 作者: ${(paper.authors || []).join(", ")}`);
-    lines.push(`- 作者单位: ${(paper.author_affiliations || []).join("; ")}`);
-    lines.push(`- 期刊: ${journal}`);
-    lines.push(`- 日期: ${paper.published_date || ""}`);
-    lines.push(`- 类型: ${paper.publication_type || "unknown"}`);
-    lines.push(`- 一级领域: ${cls.domain || ""}`);
-    lines.push(`- 二级领域: ${cls.subdomain || ""}`);
-    lines.push(`- 标签: ${(cls.tags || []).join(", ")}`);
-    lines.push(`- 中文摘要: ${paper.abstract_zh || ""}`);
-    lines.push(`- 摘要总结: ${paper.summary_zh || ""}`);
-    lines.push(`- DOI: ${paper.doi || "N/A"}`);
-    lines.push(`- 链接: ${paper.url || ""}`);
-    lines.push(`- 主图: ${paper.image_url ? `![](${paper.image_url})` : ""}`);
+    const paperTitle = paper.title_zh || paper.title_en || `论文 ${index + 1}`;
+    const englishTitle = (paper.title_en || "").trim();
+    const metaLines: string[] = [];
+    const resourceLines: string[] = [];
+    const pushMeta = (target: string[], label: string, value?: string): void => {
+      const text = (value || "").trim();
+      if (text) {
+        target.push(`- **${label}**：${text}`);
+      }
+    };
+    const pushSection = (label: string, value?: string, quote = false): void => {
+      const text = normalizeBlock(value);
+      if (text) {
+        lines.push(`**${label}**  `);
+        lines.push(quote ? text.split("\n").map((line) => `> ${line}`).join("\n") : text);
+        lines.push("");
+      }
+    };
+
+    if (index > 0) {
+      lines.push("---", "");
+    }
+
+    lines.push(`## ${index + 1}. ${paperTitle}`);
     lines.push("");
+
+    if (englishTitle && englishTitle !== paperTitle) {
+      lines.push(`*${englishTitle}*`);
+      lines.push("");
+    }
+
+    pushMeta(metaLines, "作者", (paper.authors || []).join(", "));
+    pushMeta(metaLines, "作者单位", (paper.author_affiliations || []).join("；"));
+    pushMeta(metaLines, "期刊", paper.journal?.name || "");
+    pushMeta(metaLines, "日期", paper.published_date || "");
+    pushMeta(metaLines, "类型", paper.publication_type || "unknown");
+    pushMeta(metaLines, "一级领域", cls.domain || "");
+    pushMeta(metaLines, "二级领域", cls.subdomain || "");
+    pushMeta(metaLines, "标签", (cls.tags || []).join("，"));
+    if (metaLines.length > 0) {
+      lines.push(...metaLines, "");
+    }
+
+    pushSection("中文摘要", paper.abstract_zh || "");
+    pushSection("摘要总结", paper.summary_zh || "", true);
+
+    pushMeta(resourceLines, "DOI", paper.doi || "");
+    pushMeta(resourceLines, "链接", paper.url || "");
+    if (resourceLines.length > 0) {
+      lines.push("**资源信息**  ");
+      lines.push(...resourceLines, "");
+    }
+
+    if (paper.image_url) {
+      lines.push("**主图**  ");
+      lines.push(`![](${paper.image_url})`);
+      lines.push("");
+    }
   });
+
   return lines.join("\n");
 }
 
